@@ -1,0 +1,136 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           Int           @id @default(autoincrement())
+  email        String        @unique
+  passwordHash String
+  name         String
+  role         Role          @default(EMPLOYEE)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  invoices     Invoice[]
+  auditLogs    AuditLog[]
+  activityLogs ActivityLog[]
+  notifications Notification[]
+}
+
+enum Role {
+  ADMIN
+  FINANCE_MANAGER
+  EMPLOYEE
+  AUDITOR
+}
+
+model Invoice {
+  id                Int           @id @default(autoincrement())
+  invoiceNumber     String
+  invoiceDate       DateTime?
+  dueDate           DateTime?
+  vendorName        String?
+  vendorAddress     String?
+  vendorEmail       String?
+  vendorPhone       String?
+  customerName      String?
+  customerAddress   String?
+  customerEmail     String?
+  customerPhone     String?
+  gstNumber         String?
+  vatNumber         String?
+  purchaseOrder     String?
+  currency          String        @default("USD")
+  subtotal          Float         @default(0.0)
+  discount          Float         @default(0.0)
+  tax               Float         @default(0.0)
+  shipping          Float         @default(0.0)
+  grandTotal        Float         @default(0.0)
+  billingPeriod     String?
+  paymentTerms      String?
+  status            InvoiceStatus @default(DRAFT)
+  aiConfidenceScore Float         @default(0.0)
+  originalFilePath  String?
+  extractedJson     String?       // JSON text
+  editedJson        String?       // JSON text
+  currentVersion    Int           @default(1)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  creatorId         Int?
+  creator           User?         @relation(fields: [creatorId], references: [id], onDelete: SetNull)
+  items             InvoiceItem[]
+  attachments       Attachment[]
+  auditLogs         AuditLog[]
+}
+
+enum InvoiceStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  PAID
+  UNPAID
+}
+
+model InvoiceItem {
+  id          Int      @id @default(autoincrement())
+  invoiceId   Int
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  description String
+  quantity    Float    @default(1.0)
+  unitPrice   Float    @default(0.0)
+  amount      Float    @default(0.0)
+  gstRate     Float?
+  taxAmount   Float?
+}
+
+model Attachment {
+  id        Int      @id @default(autoincrement())
+  invoiceId Int
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  filePath  String
+  fileType  String
+  fileSize  Int
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  invoiceId  Int?
+  invoice    Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  userId     Int?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // UPLOAD, EXTRACT, EDIT, DELETE, RESTORE, APPROVE, REJECT, EXPORT, LOGIN
+  timestamp  DateTime @default(now())
+  ipAddress  String?
+  oldValue   String?  // JSON text
+  newValue   String?  // JSON text
+}
+
+model ActivityLog {
+  id          Int      @id @default(autoincrement())
+  userId      Int?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  description String
+  timestamp   DateTime @default(now())
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  message   String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Setting {
+  id          Int     @id @default(autoincrement())
+  key         String  @unique
+  value       String
+  description String?
+}
