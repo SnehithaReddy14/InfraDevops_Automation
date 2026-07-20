@@ -3,8 +3,12 @@ import path from 'path';
 import fs from 'fs';
 import * as xlsx from 'xlsx';
 import { prisma } from '../utils/db';
-import { extractInvoiceData } from '../services/ocrService';
+import { parseInvoiceByProvider } from '../services/parserRouter';
 import { askAssistant } from '../services/assistantService';
+import { enrichMetadataWithTotals, normalizeCurrency } from '../utils/currencyUtils';
+import { invoiceIdsForEnvironment, persistInvoiceEnvironment, distinctInvoiceEnvironments } from '../utils/invoiceEnvironment';
+import { ensureFreshExchangeRate, getInrPerUsd } from '../services/exchangeRateService';
+import { enrichInvoice, enrichInvoices, extractInvoiceDetails, splitInvoicePayload } from '../utils/invoiceDetails';
 
 // Setup file storage paths
 const UPLOADS_DIR = path.join(__dirname, '..', '..', 'uploads');
@@ -14,71 +18,186 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 
 // 1. Upload Invoice and Run AI OCR
 export const uploadInvoice = async (req: any, res: Response): Promise<any> => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
-  }
-
-  const { filename, path: filePath, mimetype, size } = req.file;
   const userId = req.user?.id || 1; // Default to admin user (id: 1) if not provided
 
-  try {
-    const fileBuffer = fs.readFileSync(filePath);
-    const relativePath = `/uploads/${filename}`;
+  let filename = '';
+  let filePath = '';
+  let mimetype = 'application/pdf';
+  let size = 0;
+  let relativePath = '';
 
-    // Extract invoice data via real AI OCR
-    let extractedData;
-    try {
-      extractedData = await extractInvoiceData(fileBuffer, mimetype, filename);
-    } catch (ocrError: any) {
-      console.error('[OCR Error]', ocrError.message);
-      // Clean up the uploaded file if OCR fails
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      return res.status(422).json({
-        error: 'AI Extraction failed',
-        details: ocrError.message,
+  try {
+    let extractedData: any;
+
+    if (req.file) {
+      filename = req.file.filename;
+      filePath = req.file.path;
+      mimetype = req.file.mimetype;
+      size = req.file.size;
+      const fileBuffer = fs.readFileSync(filePath);
+      relativePath = `/uploads/${filename}`;
+
+      let projectId = req.body.projectId || req.query.projectId;
+      let billingProvider = 'Custom';
+      let parsedProjectId: number | null = null;
+
+      if (projectId) {
+        parsedProjectId = parseInt(projectId);
+        if (!isNaN(parsedProjectId)) {
+          const project = await prisma.project.findUnique({
+            where: { id: parsedProjectId }
+          });
+          if (project) {
+            billingProvider = project.billingProvider;
+          }
+        }
+      }
+
+      // Extract invoice data via routed parsers
+      try {
+        extractedData = await parseInvoiceByProvider(fileBuffer, mimetype, filename, billingProvider);
+      } catch (ocrError: any) {
+        console.error('[OCR Error]', ocrError.message);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        return res.status(422).json({
+          error: 'AI Extraction failed',
+          details: ocrError.message,
+        });
+      }
+    } else if (req.body.tempFilePath) {
+      relativePath = req.body.tempFilePath;
+      filename = path.basename(relativePath);
+      filePath = path.join(__dirname, '..', '..', relativePath);
+      extractedData = {
+        invoiceNumber: req.body.invoiceNumber,
+        invoiceDate: req.body.invoiceDate ? new Date(req.body.invoiceDate) : null,
+        dueDate: req.body.dueDate ? new Date(req.body.dueDate) : null,
+        vendorName: req.body.vendorName,
+        vendorAddress: req.body.vendorAddress,
+        vendorEmail: req.body.vendorEmail,
+        vendorPhone: req.body.vendorPhone,
+        customerName: req.body.customerName,
+        customerAddress: req.body.customerAddress,
+        customerEmail: req.body.customerEmail,
+        customerPhone: req.body.customerPhone,
+        gstNumber: req.body.gstNumber,
+        vatNumber: req.body.vatNumber,
+        purchaseOrder: req.body.purchaseOrder,
+        currency: req.body.currency || 'USD',
+        subtotal: parseFloat(req.body.subtotal) || 0,
+        discount: parseFloat(req.body.discount) || 0,
+        tax: parseFloat(req.body.tax) || 0,
+        shipping: parseFloat(req.body.shipping) || 0,
+        grandTotal: parseFloat(req.body.grandTotal) || 0,
+        billingPeriod: req.body.billingPeriod,
+        billingMonth: req.body.billingMonth,
+        awsAccount: req.body.awsAccount,
+        paymentTerms: req.body.paymentTerms,
+        confidenceScore: parseFloat(req.body.confidenceScore) || 0.95,
+        lineItems: req.body.lineItems || []
+      };
+    } else {
+      return res.status(400).json({ error: 'No file uploaded and no pre-extracted details provided' });
+    }
+
+    // Check if duplicate invoice exists by invoice number
+    const duplicateInvoice = await prisma.invoice.findFirst({
+      where: { invoiceNumber: extractedData.invoiceNumber },
+      include: { attachments: true }
+    });
+
+    if (duplicateInvoice) {
+      // Auto-overwrite the existing duplicate invoice statement
+      for (const attachment of duplicateInvoice.attachments) {
+        const localFilePath = path.join(__dirname, '..', '..', attachment.filePath);
+        if (fs.existsSync(localFilePath)) {
+          try {
+            fs.unlinkSync(localFilePath);
+          } catch (err) {}
+        }
+      }
+      await prisma.invoice.delete({
+        where: { id: duplicateInvoice.id }
       });
     }
 
     // Save in Database using Prisma
+    await ensureFreshExchangeRate();
+    const resolvedCurrency = normalizeCurrency(
+      extractedData.currency || req.body.defaultCurrency || 'USD'
+    );
+    let metadataObj: Record<string, unknown> = {};
+    try {
+      if (extractedData.metadata) {
+        metadataObj =
+          typeof extractedData.metadata === 'string'
+            ? JSON.parse(extractedData.metadata)
+            : extractedData.metadata;
+      } else {
+        metadataObj = { ...extractedData };
+      }
+    } catch {
+      metadataObj = { ...extractedData };
+    }
+    metadataObj = enrichMetadataWithTotals(
+      metadataObj,
+      resolvedCurrency,
+      Number(extractedData.grandTotal) || 0
+    );
+
+    const detailFields = extractInvoiceDetails({
+      ...extractedData,
+      dueDate:
+        extractedData.dueDate instanceof Date
+          ? extractedData.dueDate.toISOString()
+          : extractedData.dueDate,
+    });
+    if (Object.keys(detailFields).length > 0) {
+      metadataObj.details = {
+        ...((metadataObj.details as Record<string, unknown>) || {}),
+        ...detailFields,
+      };
+    }
+
+    const envValue =
+      (typeof req.body.environment === 'string' && req.body.environment.trim()) ||
+      (typeof extractedData.environment === 'string' && extractedData.environment.trim()) ||
+      null;
+    if (envValue) {
+      metadataObj.environment = envValue;
+    }
+
     const invoiceData: any = {
       invoiceNumber: extractedData.invoiceNumber,
       invoiceDate: extractedData.invoiceDate,
-      dueDate: extractedData.dueDate,
       vendorName: extractedData.vendorName,
-      vendorAddress: extractedData.vendorAddress,
-      vendorEmail: extractedData.vendorEmail,
-      vendorPhone: extractedData.vendorPhone,
-      customerName: extractedData.customerName,
-      customerAddress: extractedData.customerAddress,
-      customerEmail: extractedData.customerEmail,
-      customerPhone: extractedData.customerPhone,
-      gstNumber: extractedData.gstNumber,
-      vatNumber: extractedData.vatNumber,
-      purchaseOrder: extractedData.purchaseOrder,
-      currency: extractedData.currency,
+      currency: resolvedCurrency,
       subtotal: extractedData.subtotal,
       discount: extractedData.discount,
       tax: extractedData.tax,
       shipping: extractedData.shipping,
       grandTotal: extractedData.grandTotal,
       billingPeriod: extractedData.billingPeriod,
-      paymentTerms: extractedData.paymentTerms,
-      status: 'PENDING_REVIEW',
-      aiConfidenceScore: extractedData.confidenceScore,
+      billingMonth: extractedData.billingMonth || req.body.billingMonth || null,
+      awsAccount: extractedData.awsAccount || req.body.awsAccount || null,
+      status: 'SAVED',
+      aiConfidenceScore: extractedData.confidenceScore || 0.95,
       originalFilePath: relativePath,
-      extractedJson: JSON.stringify(extractedData),
-      editedJson: JSON.stringify(extractedData),
+      extractedJson: JSON.stringify({ ...extractedData, currency: resolvedCurrency }),
+      editedJson: JSON.stringify({ ...extractedData, currency: resolvedCurrency }),
+      metadata: JSON.stringify(metadataObj),
       currentVersion: 1,
-      // Skip creatorId for now - test without it
+      projectId: req.body.projectId ? parseInt(req.body.projectId) : (req.query.projectId ? parseInt(req.query.projectId as string) : null),
     };
     
     const invoice = await (async () => {
       const inv = await prisma.invoice.create({ data: invoiceData });
+      await persistInvoiceEnvironment(inv.id, envValue);
 
       // Save Line Items
       if (extractedData.lineItems && extractedData.lineItems.length > 0) {
         await prisma.invoiceItem.createMany({
-          data: extractedData.lineItems.map((item) => ({
+          data: extractedData.lineItems.map((item: any) => ({
             invoiceId: inv.id,
             description: item.description,
             quantity: item.quantity,
@@ -97,41 +216,6 @@ export const uploadInvoice = async (req: any, res: Response): Promise<any> => {
           fileSize: size,
         },
       });
-
-      // Create Audit Logs (non-critical, may fail if user doesn't exist)
-      try {
-        if (userId) {
-          await prisma.auditLog.create({
-            data: {
-              invoiceId: inv.id,
-              userId,
-              action: 'UPLOAD',
-              ipAddress: req.ip || req.socket.remoteAddress,
-              newValue: JSON.stringify({ filename, size, mimetype }),
-            },
-          });
-
-          await prisma.auditLog.create({
-            data: {
-              invoiceId: inv.id,
-              userId,
-              action: 'EXTRACT',
-              ipAddress: req.ip || req.socket.remoteAddress,
-              newValue: JSON.stringify(extractedData),
-            },
-          });
-
-          // Create general timeline activity log
-          await prisma.activityLog.create({
-            data: {
-              userId,
-              description: `Uploaded and extracted invoice ${extractedData.invoiceNumber} from ${extractedData.vendorName}`,
-            },
-          });
-        }
-      } catch (logError) {
-        // Silently continue - audit logs are non-critical
-      }
 
       return inv;
     })();
@@ -165,6 +249,7 @@ export const getInvoices = async (req: Request, res: Response): Promise<any> => 
     maxAmount,
     startDate,
     endDate,
+    projectId,
     sortBy = 'createdAt',
     sortOrder = 'desc',
   } = req.query;
@@ -174,6 +259,13 @@ export const getInvoices = async (req: Request, res: Response): Promise<any> => 
   const skip = (p - 1) * l;
 
   const where: any = {};
+
+  if (projectId) {
+    const parsedPid = parseInt(projectId as string);
+    if (!isNaN(parsedPid)) {
+      where.projectId = parsedPid;
+    }
+  }
 
   // Global search (invoice number, vendor, customer)
   if (search) {
@@ -220,7 +312,7 @@ export const getInvoices = async (req: Request, res: Response): Promise<any> => 
     });
 
     return res.status(200).json({
-      invoices,
+      invoices: enrichInvoices(invoices),
       pagination: {
         page: p,
         limit: l,
@@ -245,17 +337,14 @@ export const getInvoiceById = async (req: Request, res: Response): Promise<any> 
       include: {
         items: true,
         attachments: true,
-        auditLogs: {
-          include: { user: { select: { name: true, email: true, role: true } } },
-          orderBy: { timestamp: 'desc' },
-        },
         creator: { select: { name: true, email: true, role: true } },
+        project: { select: { id: true, name: true, code: true } },
       },
     });
 
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
-    return res.status(200).json({ invoice });
+    return res.status(200).json({ invoice: enrichInvoice(invoice) });
   } catch (error) {
     return res.status(500).json({ error: 'Internal server error' });
   }
@@ -266,17 +355,9 @@ export const updateInvoice = async (req: any, res: Response): Promise<any> => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid invoice ID' });
 
-  const userId = req.user?.id;
-  const { items, ...invoiceData } = req.body;
+  const { items, ...rawInvoiceData } = req.body;
 
   try {
-    // Validate userId exists in database to prevent FK constraint crashes (defensive coding)
-    let validUserId: number | null = null;
-    if (userId) {
-      const userExists = await prisma.user.findUnique({ where: { id: userId } });
-      if (userExists) validUserId = userId;
-    }
-
     const existingInvoice = await prisma.invoice.findUnique({
       where: { id },
       include: { items: true },
@@ -286,55 +367,50 @@ export const updateInvoice = async (req: any, res: Response): Promise<any> => {
       return res.status(404).json({ error: 'Invoice not found' });
     }
 
+    const { core: invoiceData, metadataJson } = splitInvoicePayload({
+      ...rawInvoiceData,
+      metadata: rawInvoiceData.metadata ?? existingInvoice.metadata,
+    });
+
     // Prepare update parameters (recalculate totals if items were updated)
-    let subtotal = invoiceData.subtotal !== undefined ? parseFloat(invoiceData.subtotal) : existingInvoice.subtotal;
-    let discount = invoiceData.discount !== undefined ? parseFloat(invoiceData.discount) : existingInvoice.discount;
-    let tax = invoiceData.tax !== undefined ? parseFloat(invoiceData.tax) : existingInvoice.tax;
-    let shipping = invoiceData.shipping !== undefined ? parseFloat(invoiceData.shipping) : existingInvoice.shipping;
-    let grandTotal = invoiceData.grandTotal !== undefined ? parseFloat(invoiceData.grandTotal) : existingInvoice.grandTotal;
+    let subtotal = invoiceData.subtotal !== undefined ? parseFloat(String(invoiceData.subtotal)) : existingInvoice.subtotal;
+    let discount = invoiceData.discount !== undefined ? parseFloat(String(invoiceData.discount)) : existingInvoice.discount;
+    let tax = invoiceData.tax !== undefined ? parseFloat(String(invoiceData.tax)) : existingInvoice.tax;
+    let shipping = invoiceData.shipping !== undefined ? parseFloat(String(invoiceData.shipping)) : existingInvoice.shipping;
+    let grandTotal = invoiceData.grandTotal !== undefined ? parseFloat(String(invoiceData.grandTotal)) : existingInvoice.grandTotal;
 
     if (items && Array.isArray(items)) {
-      // Calculate subtotal from items
       subtotal = items.reduce((acc: number, curr: any) => acc + (parseFloat(curr.quantity) * parseFloat(curr.unitPrice)), 0);
       grandTotal = subtotal - discount + tax + shipping;
     }
 
-    const updatedInvoice = await prisma.$transaction(async (tx) => {
-      // Create version increment
+    await prisma.$transaction(async (tx) => {
       const nextVersion = existingInvoice.currentVersion + 1;
 
-      const updated = await tx.invoice.update({
+      await tx.invoice.update({
         where: { id },
         data: {
-          invoiceNumber: invoiceData.invoiceNumber,
-          invoiceDate: invoiceData.invoiceDate ? new Date(invoiceData.invoiceDate) : null,
-          dueDate: invoiceData.dueDate ? new Date(invoiceData.dueDate) : null,
-          vendorName: invoiceData.vendorName,
-          vendorAddress: invoiceData.vendorAddress,
-          vendorEmail: invoiceData.vendorEmail,
-          vendorPhone: invoiceData.vendorPhone,
-          customerName: invoiceData.customerName,
-          customerAddress: invoiceData.customerAddress,
-          customerEmail: invoiceData.customerEmail,
-          customerPhone: invoiceData.customerPhone,
-          gstNumber: invoiceData.gstNumber,
-          vatNumber: invoiceData.vatNumber,
-          purchaseOrder: invoiceData.purchaseOrder,
-          currency: invoiceData.currency,
+          ...(invoiceData.invoiceNumber !== undefined && { invoiceNumber: String(invoiceData.invoiceNumber) }),
+          ...(invoiceData.invoiceDate !== undefined && {
+            invoiceDate: invoiceData.invoiceDate ? new Date(String(invoiceData.invoiceDate)) : null,
+          }),
+          ...(invoiceData.vendorName !== undefined && { vendorName: String(invoiceData.vendorName) }),
+          ...(invoiceData.currency !== undefined && { currency: String(invoiceData.currency) }),
           subtotal,
           discount,
           tax,
           shipping,
           grandTotal,
-          billingPeriod: invoiceData.billingPeriod,
-          paymentTerms: invoiceData.paymentTerms,
-          status: invoiceData.status || existingInvoice.status,
+          ...(invoiceData.billingPeriod !== undefined && { billingPeriod: String(invoiceData.billingPeriod) }),
+          ...(invoiceData.billingMonth !== undefined && { billingMonth: String(invoiceData.billingMonth) }),
+          ...(invoiceData.awsAccount !== undefined && { awsAccount: String(invoiceData.awsAccount) }),
+          status: (invoiceData.status as string) || existingInvoice.status,
+          metadata: metadataJson ?? existingInvoice.metadata,
           currentVersion: nextVersion,
-          editedJson: JSON.stringify({ ...invoiceData, lineItems: items }),
+          editedJson: JSON.stringify({ ...rawInvoiceData, lineItems: items }),
         },
       });
 
-      // Update line items if provided
       if (items && Array.isArray(items)) {
         await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
         await tx.invoiceItem.createMany({
@@ -347,42 +423,6 @@ export const updateInvoice = async (req: any, res: Response): Promise<any> => {
           })),
         });
       }
-
-      // Compile differences for AuditLog
-      const diff: any = {};
-      const fields = [
-        'invoiceNumber', 'invoiceDate', 'dueDate', 'vendorName', 'vendorAddress',
-        'customerName', 'subtotal', 'discount', 'tax', 'grandTotal', 'status'
-      ];
-
-      for (const field of fields) {
-        const oldVal = (existingInvoice as any)[field];
-        const newVal = (updated as any)[field];
-        if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
-          diff[field] = { old: oldVal, new: newVal };
-        }
-      }
-
-      // Add audit log entry
-      await tx.auditLog.create({
-        data: {
-          invoiceId: id,
-          userId: validUserId,
-          action: 'EDIT',
-          ipAddress: req.ip || req.socket.remoteAddress,
-          oldValue: JSON.stringify(existingInvoice),
-          newValue: JSON.stringify(updated),
-        },
-      });
-
-      await tx.activityLog.create({
-        data: {
-          userId: validUserId,
-          description: `Updated details for invoice ${updated.invoiceNumber}`,
-        },
-      });
-
-      return updated;
     });
 
     const fullUpdated = await prisma.invoice.findUnique({
@@ -392,7 +432,7 @@ export const updateInvoice = async (req: any, res: Response): Promise<any> => {
 
     return res.status(200).json({
       message: 'Invoice updated successfully',
-      invoice: fullUpdated,
+      invoice: fullUpdated ? enrichInvoice(fullUpdated) : null,
     });
   } catch (error) {
     console.error('Update invoice error:', error);
@@ -405,16 +445,7 @@ export const approveInvoice = async (req: any, res: Response): Promise<any> => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid invoice ID' });
 
-  const userId = req.user?.id;
-
   try {
-    // Validate userId exists in database to prevent FK constraint crashes (defensive coding)
-    let validUserId: number | null = null;
-    if (userId) {
-      const userExists = await prisma.user.findUnique({ where: { id: userId } });
-      if (userExists) validUserId = userId;
-    }
-
     const invoice = await prisma.invoice.findUnique({ where: { id } });
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
@@ -422,24 +453,6 @@ export const approveInvoice = async (req: any, res: Response): Promise<any> => {
       const inv = await tx.invoice.update({
         where: { id },
         data: { status: 'APPROVED' },
-      });
-
-      await tx.auditLog.create({
-        data: {
-          invoiceId: id,
-          userId: validUserId,
-          action: 'APPROVE',
-          ipAddress: req.ip || req.socket.remoteAddress,
-          oldValue: JSON.stringify({ status: invoice.status }),
-          newValue: JSON.stringify({ status: 'APPROVED' }),
-        },
-      });
-
-      await tx.activityLog.create({
-        data: {
-          userId: validUserId,
-          description: `Approved invoice ${invoice.invoiceNumber}`,
-        },
       });
 
       return inv;
@@ -456,16 +469,7 @@ export const rejectInvoice = async (req: any, res: Response): Promise<any> => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid invoice ID' });
 
-  const userId = req.user?.id;
-
   try {
-    // Validate userId exists in database to prevent FK constraint crashes (defensive coding)
-    let validUserId: number | null = null;
-    if (userId) {
-      const userExists = await prisma.user.findUnique({ where: { id: userId } });
-      if (userExists) validUserId = userId;
-    }
-
     const invoice = await prisma.invoice.findUnique({ where: { id } });
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
@@ -473,24 +477,6 @@ export const rejectInvoice = async (req: any, res: Response): Promise<any> => {
       const inv = await tx.invoice.update({
         where: { id },
         data: { status: 'REJECTED' },
-      });
-
-      await tx.auditLog.create({
-        data: {
-          invoiceId: id,
-          userId: validUserId,
-          action: 'REJECT',
-          ipAddress: req.ip || req.socket.remoteAddress,
-          oldValue: JSON.stringify({ status: invoice.status }),
-          newValue: JSON.stringify({ status: 'REJECTED' }),
-        },
-      });
-
-      await tx.activityLog.create({
-        data: {
-          userId: validUserId,
-          description: `Rejected invoice ${invoice.invoiceNumber}`,
-        },
       });
 
       return inv;
@@ -507,8 +493,6 @@ export const deleteInvoice = async (req: any, res: Response): Promise<any> => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid invoice ID' });
 
-  const userId = req.user?.id;
-
   try {
     const invoice = await prisma.invoice.findUnique({
       where: { id },
@@ -516,35 +500,17 @@ export const deleteInvoice = async (req: any, res: Response): Promise<any> => {
     });
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
-    // Validate userId exists in database to prevent FK constraint crashes (defensive coding)
-    let validUserId: number | null = null;
-    if (userId) {
-      const userExists = await prisma.user.findUnique({ where: { id: userId } });
-      if (userExists) validUserId = userId;
-    }
-
     await prisma.$transaction(async (tx) => {
-      // Delete invoice (Cascade will delete items and attachments)
       await tx.invoice.delete({ where: { id } });
-
-      await tx.auditLog.create({
-        data: {
-          userId: validUserId,
-          action: 'DELETE',
-          ipAddress: req.ip || req.socket.remoteAddress,
-          oldValue: JSON.stringify(invoice),
-        },
-      });
-
-      await tx.activityLog.create({
-        data: {
-          userId: validUserId,
-          description: `Deleted invoice ${invoice.invoiceNumber}`,
-        },
-      });
     });
 
     // Remove physical files associated
+    if (invoice.originalFilePath) {
+      const mainPath = path.join(__dirname, '..', '..', invoice.originalFilePath);
+      if (fs.existsSync(mainPath)) {
+        try { fs.unlinkSync(mainPath); } catch { /* ignore file cleanup errors */ }
+      }
+    }
     for (const attachment of invoice.attachments) {
       const localFilePath = path.join(__dirname, '..', '..', attachment.filePath);
       if (fs.existsSync(localFilePath)) {
@@ -562,7 +528,6 @@ export const deleteInvoice = async (req: any, res: Response): Promise<any> => {
 // 8. Bulk Operations (Approve, Reject, Delete)
 export const handleBulkAction = async (req: any, res: Response): Promise<any> => {
   const { ids, action } = req.body;
-  const userId = req.user?.id;
 
   if (!ids || !Array.isArray(ids) || ids.length === 0 || !action) {
     return res.status(400).json({ error: 'Invoice IDs and action are required' });
@@ -571,13 +536,6 @@ export const handleBulkAction = async (req: any, res: Response): Promise<any> =>
   const numericIds = ids.map(id => parseInt(id)).filter(id => !isNaN(id));
 
   try {
-    // Validate userId exists in database to prevent FK constraint crashes (defensive coding)
-    let validUserId: number | null = null;
-    if (userId) {
-      const userExists = await prisma.user.findUnique({ where: { id: userId } });
-      if (userExists) validUserId = userId;
-    }
-
     if (action === 'DELETE') {
       const attachments = await prisma.attachment.findMany({
         where: { invoiceId: { in: numericIds } },
@@ -586,24 +544,6 @@ export const handleBulkAction = async (req: any, res: Response): Promise<any> =>
       await prisma.$transaction(async (tx) => {
         await tx.invoice.deleteMany({
           where: { id: { in: numericIds } },
-        });
-
-        for (const id of numericIds) {
-          await tx.auditLog.create({
-            data: {
-              userId: validUserId,
-              action: 'DELETE_BULK',
-              ipAddress: req.ip || req.socket.remoteAddress,
-              oldValue: JSON.stringify({ id }),
-            },
-          });
-        }
-
-        await tx.activityLog.create({
-          data: {
-            userId: validUserId,
-            description: `Bulk deleted ${numericIds.length} invoices`,
-          },
         });
       });
 
@@ -616,32 +556,19 @@ export const handleBulkAction = async (req: any, res: Response): Promise<any> =>
       }
 
       return res.status(200).json({ message: `Bulk deleted ${numericIds.length} invoices successfully` });
-    } else if (action === 'APPROVE' || action === 'REJECT') {
-      const newStatus = action === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+    } else if (action === 'APPROVE' || action === 'REJECT' || action === 'PAID' || action === 'UNPAID') {
+      const newStatus = action === 'APPROVE' 
+        ? 'APPROVED' 
+        : action === 'REJECT' 
+          ? 'REJECTED' 
+          : action === 'PAID' 
+            ? 'PAID' 
+            : 'UNPAID';
 
       await prisma.$transaction(async (tx) => {
         await tx.invoice.updateMany({
           where: { id: { in: numericIds } },
           data: { status: newStatus },
-        });
-
-        for (const id of numericIds) {
-          await tx.auditLog.create({
-            data: {
-              invoiceId: id,
-              userId: validUserId,
-              action: action,
-              ipAddress: req.ip || req.socket.remoteAddress,
-              newValue: JSON.stringify({ status: newStatus }),
-            },
-          });
-        }
-
-        await tx.activityLog.create({
-          data: {
-            userId: validUserId,
-            description: `Bulk status updated ${numericIds.length} invoices to ${newStatus}`,
-          },
         });
       });
 
@@ -658,100 +585,233 @@ export const handleBulkAction = async (req: any, res: Response): Promise<any> =>
 // 9. Dashboard Statistics Aggregator
 export const getDashboardStats = async (req: Request, res: Response): Promise<any> => {
   try {
-    const invoiceCount = await prisma.invoice.count();
-    
-    // Sums and counts by status
-    const statusCounts = await prisma.invoice.groupBy({
-      by: ['status'],
-      _count: { id: true },
-      _sum: { grandTotal: true },
-    });
+    const targetCurrency = String(req.query.defaultCurrency || 'USD').toUpperCase();
 
-    const totalRevenueSum = await prisma.invoice.aggregate({
-      where: { status: { in: ['APPROVED', 'PAID'] } },
-      _sum: { grandTotal: true },
-    });
+    await ensureFreshExchangeRate();
+    const inrPerUsd = getInrPerUsd();
 
-    const pendingReviewCount = await prisma.invoice.count({ where: { status: 'PENDING_REVIEW' } });
-    const approvedCount = await prisma.invoice.count({ where: { status: 'APPROVED' } });
-    const rejectedCount = await prisma.invoice.count({ where: { status: 'REJECTED' } });
-    const paidCount = await prisma.invoice.count({ where: { status: 'PAID' } });
-    const unpaidCount = await prisma.invoice.count({ where: { status: 'UNPAID' } });
+    // Exchange rates with USD base (INR rate is live)
+    const EXCHANGE_RATES: Record<string, number> = {
+      USD: 1.0,
+      INR: inrPerUsd,
+      EUR: 0.92,
+      GBP: 0.78,
+    };
 
-    // Vendors count
-    const uniqueVendors = await prisma.invoice.groupBy({
-      by: ['vendorName'],
-    });
+    const convertCurrency = (amount: number, from: string | null | undefined, to: string): number => {
+      const fromUpper = (from || 'USD').toUpperCase();
+      const toUpper = (to || 'USD').toUpperCase();
+      if (fromUpper === toUpper) return amount;
+      const rateFrom = EXCHANGE_RATES[fromUpper] || 1.0;
+      const rateTo = EXCHANGE_RATES[toUpper] || 1.0;
+      return (amount / rateFrom) * rateTo;
+    };
 
-    // Monthly spend / revenue trend
-    const allInvoices = await prisma.invoice.findMany({
-      where: { status: { in: ['APPROVED', 'PAID'] } },
-      select: { grandTotal: true, invoiceDate: true },
-    });
+    // Load all invoices to do correct currency conversion in-memory
+    const envFilter = typeof req.query.environment === 'string' ? req.query.environment.trim() : '';
+    const distinctEnvs = await distinctInvoiceEnvironments();
+    const envIds = await invoiceIdsForEnvironment(envFilter || undefined);
 
-    const monthlyTrends: Record<string, number> = {};
-    for (const inv of allInvoices) {
-      if (inv.invoiceDate) {
-        const monthYear = inv.invoiceDate.toLocaleString('default', { month: 'short', year: 'numeric' });
-        monthlyTrends[monthYear] = (monthlyTrends[monthYear] || 0) + inv.grandTotal;
+    const invoices = await prisma.invoice.findMany({
+      where: envIds ? { id: { in: envIds.length ? envIds : [-1] } } : undefined,
+      select: {
+        id: true,
+        grandTotal: true,
+        currency: true,
+        status: true,
+        vendorName: true,
+        invoiceDate: true,
+        billingPeriod: true,
+        billingMonth: true,
+        projectId: true,
+        project: { select: { id: true, name: true } },
       }
-    }
+    });
+
+    const invoiceCount = invoices.length;
+
+    const billableStatuses = ['SAVED', 'SCANNED', 'PENDING_REVIEW', 'APPROVED', 'PAID', 'UNPAID'];
+
+    // Total revenue — all saved/uploaded invoices except rejected/draft
+    let totalRevenue = 0;
+    invoices.forEach(inv => {
+      if (billableStatuses.includes(inv.status)) {
+        totalRevenue += convertCurrency(inv.grandTotal, inv.currency, targetCurrency);
+      }
+    });
+
+    // Unique Vendors count
+    const uniqueVendors = Array.from(new Set(invoices.map(i => i.vendorName).filter(Boolean)));
+
+    const getMonthFromBillingPeriod = (billingPeriod: string | null | undefined, fallbackDate: Date | null): string => {
+      if (billingPeriod) {
+        const trimmed = billingPeriod.trim();
+        const monthNames = [
+          'January', 'February', 'March', 'April', 'May', 'June',
+          'July', 'August', 'September', 'October', 'November', 'December',
+          'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+        ];
+        
+        for (const name of monthNames) {
+          const regex = new RegExp(`\\b${name}\\b`, 'i');
+          if (regex.test(trimmed)) {
+            const shortName = name.slice(0, 3);
+            const capitalized = shortName.charAt(0).toUpperCase() + shortName.slice(1).toLowerCase();
+            const yearMatch = trimmed.match(/\b(20\d{2})\b/);
+            if (yearMatch) {
+              return `${capitalized} ${yearMatch[1]}`;
+            }
+            if (fallbackDate) {
+              return `${capitalized} ${fallbackDate.getFullYear()}`;
+            }
+            return `${capitalized} ${new Date().getFullYear()}`;
+          }
+        }
+        
+        const ymMatch1 = trimmed.match(/\b(20\d{2})[-/](0[1-9]|1[0-2])\b/);
+        if (ymMatch1) {
+          const year = ymMatch1[1];
+          const monthIdx = parseInt(ymMatch1[2]) - 1;
+          const monthNamesShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          return `${monthNamesShort[monthIdx]} ${year}`;
+        }
+
+        const ymMatch2 = trimmed.match(/\b(0[1-9]|1[0-2])[-/](20\d{2})\b/);
+        if (ymMatch2) {
+          const year = ymMatch2[2];
+          const monthIdx = parseInt(ymMatch2[1]) - 1;
+          const monthNamesShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          return `${monthNamesShort[monthIdx]} ${year}`;
+        }
+      }
+      
+      if (fallbackDate) {
+        return fallbackDate.toLocaleString('default', { month: 'short', year: 'numeric' });
+      }
+      return new Date().toLocaleString('default', { month: 'short', year: 'numeric' });
+    };
+
+    // Monthly trends in target currency
+    const monthlyTrends: Record<string, number> = {};
+    invoices.forEach(inv => {
+      if (billableStatuses.includes(inv.status)) {
+        const monthYear = inv.billingMonth?.trim() || getMonthFromBillingPeriod(inv.billingPeriod, inv.invoiceDate);
+        const convertedVal = convertCurrency(inv.grandTotal, inv.currency, targetCurrency);
+        monthlyTrends[monthYear] = (monthlyTrends[monthYear] || 0) + convertedVal;
+      }
+    });
 
     const trendArray = Object.entries(monthlyTrends).map(([name, value]) => ({
       name,
       value,
-    })).reverse().slice(-12); // Last 12 months
-
-    // Vendor spending breakdown
-    const vendorSums = await prisma.invoice.groupBy({
-      by: ['vendorName'],
-      _sum: { grandTotal: true },
-      orderBy: { _sum: { grandTotal: 'desc' } },
-      take: 5,
-    });
-
-    const vendorSpendData = vendorSums.map((v) => ({
-      name: v.vendorName || 'Unknown',
-      value: v._sum.grandTotal || 0,
     }));
 
-    // Status breakdown for Pie Chart
-    const statusData = statusCounts.map(s => ({
-      name: s.status,
-      value: s._sum.grandTotal || 0,
-      count: s._count.id,
-    }));
-
-    // Recent activities (timeline)
-    const recentActivity = await prisma.activityLog.findMany({
-      orderBy: { timestamp: 'desc' },
-      take: 10,
-      include: { user: { select: { name: true, role: true } } },
+    trendArray.sort((a, b) => {
+      const parseDate = (str: string) => {
+        const parts = str.split(' ');
+        if (parts.length === 2) {
+          const monthIndex = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(parts[0].toLowerCase());
+          const year = parseInt(parts[1]);
+          if (monthIndex !== -1 && !isNaN(year)) {
+            return new Date(year, monthIndex, 1).getTime();
+          }
+        }
+        return 0;
+      };
+      return parseDate(a.name) - parseDate(b.name);
     });
+
+    const finalTrendArray = trendArray.slice(-12);
+
+    // Vendor spending breakdown in target currency
+    const vendorSpendingMap: Record<string, number> = {};
+    invoices.forEach(inv => {
+      if (billableStatuses.includes(inv.status)) {
+        const vendor = inv.vendorName || 'Unknown Vendor';
+        const convertedVal = convertCurrency(inv.grandTotal, inv.currency, targetCurrency);
+        vendorSpendingMap[vendor] = (vendorSpendingMap[vendor] || 0) + convertedVal;
+      }
+    });
+
+    const vendorSpendData = Object.entries(vendorSpendingMap)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5);
+
+    const parseMonthSortKey = (str: string): number => {
+      const parts = str.split(/[\s-]+/).filter(Boolean);
+      if (parts.length >= 2) {
+        const monthIndex = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(
+          parts[0].slice(0, 3).toLowerCase()
+        );
+        const yearRaw = parts[parts.length - 1];
+        const year = yearRaw.length === 2 ? parseInt(`20${yearRaw}`) : parseInt(yearRaw);
+        if (monthIndex !== -1 && !isNaN(year)) {
+          return new Date(year, monthIndex, 1).getTime();
+        }
+      }
+      return 0;
+    };
+
+    const projectCount = await prisma.project.count();
+
+    // All projects as columns (includes newly created projects with no invoices yet)
+    const allProjects = await prisma.project.findMany({
+      select: { id: true, name: true, code: true },
+      orderBy: { name: 'asc' },
+    });
+
+    const matrix: Record<string, Record<number, number>> = {};
+
+    invoices.forEach((inv) => {
+      if (!billableStatuses.includes(inv.status)) return;
+      const monthKey = inv.billingMonth?.trim() || getMonthFromBillingPeriod(inv.billingPeriod, inv.invoiceDate);
+      const converted = convertCurrency(inv.grandTotal, inv.currency, targetCurrency);
+
+      if (!matrix[monthKey]) matrix[monthKey] = {};
+      if (inv.projectId) {
+        matrix[monthKey][inv.projectId] = (matrix[monthKey][inv.projectId] || 0) + converted;
+      }
+    });
+
+    const months = Object.keys(matrix).sort((a, b) => parseMonthSortKey(a) - parseMonthSortKey(b));
+
+    const billingMatrix = {
+      projects: allProjects.map((p) => ({ id: p.id, name: p.name, code: p.code })),
+      months: months.map((month) => {
+        const cells = allProjects.map((p) => ({
+          projectId: p.id,
+          amount: matrix[month][p.id] ?? 0,
+        }));
+        return {
+          month,
+          cells,
+          rowTotal: cells.reduce((sum, c) => sum + c.amount, 0),
+        };
+      }),
+      columnTotals: allProjects.map((p) => ({
+        projectId: p.id,
+        amount: months.reduce((sum, m) => sum + (matrix[m][p.id] ?? 0), 0),
+      })),
+      grandTotal: months.reduce(
+        (sum, m) => sum + allProjects.reduce((s, p) => s + (matrix[m][p.id] ?? 0), 0),
+        0
+      ),
+    };
 
     return res.status(200).json({
       metrics: {
         totalInvoices: invoiceCount,
-        totalRevenue: totalRevenueSum._sum.grandTotal || 0,
-        pendingReview: pendingReviewCount,
-        approved: approvedCount,
-        rejected: rejectedCount,
-        paid: paidCount,
-        unpaid: unpaidCount,
+        totalRevenue,
+        projectCount,
         uniqueVendors: uniqueVendors.length,
       },
       charts: {
-        monthlyRevenue: trendArray,
+        monthlyRevenue: finalTrendArray,
         vendorSpending: vendorSpendData,
-        statusBreakdown: statusData,
       },
-      recentActivity: recentActivity.map(act => ({
-        id: act.id,
-        user: act.user?.name || 'System',
-        role: act.user?.role || '',
-        description: act.description,
-        timestamp: act.timestamp,
-      })),
+      billingMatrix,
+      distinctInvoiceEnvironments: distinctEnvs,
     });
   } catch (error) {
     console.error('Dashboard stats error:', error);
@@ -796,16 +856,6 @@ export const exportInvoices = async (req: any, res: Response): Promise<any> => {
     if (invoices.length === 0) {
       return res.status(404).json({ error: 'No invoices found to export' });
     }
-
-    // Write audit log entry
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: 'EXPORT',
-        ipAddress: req.ip || req.socket.remoteAddress,
-        newValue: JSON.stringify({ count: invoices.length, format }),
-      },
-    });
 
     if (format === 'json') {
       res.setHeader('Content-Type', 'application/json');
@@ -907,20 +957,30 @@ export const exportInvoices = async (req: any, res: Response): Promise<any> => {
   }
 };
 
-// 12. Fetch All Audit Logs
-export const getAuditLogs = async (req: Request, res: Response): Promise<any> => {
+// Extract Invoice OCR data (without saving to database)
+export const extractInvoiceOnly = async (req: any, res: Response): Promise<any> => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+
+  const { filename, path: filePath, mimetype } = req.file;
+
   try {
-    const logs = await prisma.auditLog.findMany({
-      orderBy: { timestamp: 'desc' },
-      include: {
-        user: { select: { name: true, email: true, role: true } },
-        invoice: { select: { invoiceNumber: true, vendorName: true } }
-      },
-      take: 100, // Safe limit
+    const fileBuffer = fs.readFileSync(filePath);
+    const relativePath = `/uploads/${filename}`;
+
+    const extractedData = await parseInvoiceByProvider(fileBuffer, mimetype, filename, 'Custom');
+
+    return res.status(200).json({
+      ...extractedData,
+      tempFilePath: relativePath
     });
-    return res.status(200).json({ logs });
-  } catch (error) {
-    console.error('Fetch audit logs error:', error);
-    return res.status(500).json({ error: 'Internal server error fetching audit logs' });
+  } catch (error: any) {
+    console.error('[OCR Extract Error]', error.message);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    return res.status(422).json({
+      error: 'AI Extraction failed',
+      details: error.message,
+    });
   }
 };

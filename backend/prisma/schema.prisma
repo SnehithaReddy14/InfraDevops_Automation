@@ -1,24 +1,22 @@
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 model User {
-  id           Int           @id @default(autoincrement())
-  email        String        @unique
+  id           Int       @id @default(autoincrement())
+  email        String    @unique
   passwordHash String
   name         String
-  role         Role          @default(EMPLOYEE)
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  role         Role      @default(EMPLOYEE)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
   invoices     Invoice[]
-  auditLogs    AuditLog[]
-  activityLogs ActivityLog[]
-  notifications Notification[]
 }
 
 enum Role {
@@ -32,18 +30,7 @@ model Invoice {
   id                Int           @id @default(autoincrement())
   invoiceNumber     String
   invoiceDate       DateTime?
-  dueDate           DateTime?
   vendorName        String?
-  vendorAddress     String?
-  vendorEmail       String?
-  vendorPhone       String?
-  customerName      String?
-  customerAddress   String?
-  customerEmail     String?
-  customerPhone     String?
-  gstNumber         String?
-  vatNumber         String?
-  purchaseOrder     String?
   currency          String        @default("USD")
   subtotal          Float         @default(0.0)
   discount          Float         @default(0.0)
@@ -51,20 +38,24 @@ model Invoice {
   shipping          Float         @default(0.0)
   grandTotal        Float         @default(0.0)
   billingPeriod     String?
-  paymentTerms      String?
+  billingMonth      String?
+  environment       String?
+  awsAccount        String?
   status            InvoiceStatus @default(DRAFT)
   aiConfidenceScore Float         @default(0.0)
   originalFilePath  String?
-  extractedJson     String?       // JSON text
-  editedJson        String?       // JSON text
+  extractedJson     String?
+  editedJson        String?
+  metadata          String?
   currentVersion    Int           @default(1)
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
   creatorId         Int?
   creator           User?         @relation(fields: [creatorId], references: [id], onDelete: SetNull)
+  projectId         Int?
+  project           Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
   items             InvoiceItem[]
   attachments       Attachment[]
-  auditLogs         AuditLog[]
 }
 
 enum InvoiceStatus {
@@ -74,18 +65,18 @@ enum InvoiceStatus {
   REJECTED
   PAID
   UNPAID
+  SCANNED
+  SAVED
 }
 
 model InvoiceItem {
-  id          Int      @id @default(autoincrement())
+  id          Int     @id @default(autoincrement())
   invoiceId   Int
-  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   description String
-  quantity    Float    @default(1.0)
-  unitPrice   Float    @default(0.0)
-  amount      Float    @default(0.0)
-  gstRate     Float?
-  taxAmount   Float?
+  quantity    Float   @default(1.0)
+  unitPrice   Float   @default(0.0)
+  amount      Float   @default(0.0)
 }
 
 model Attachment {
@@ -98,39 +89,47 @@ model Attachment {
   createdAt DateTime @default(now())
 }
 
-model AuditLog {
-  id         Int      @id @default(autoincrement())
-  invoiceId  Int?
-  invoice    Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
-  userId     Int?
-  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  action     String   // UPLOAD, EXTRACT, EDIT, DELETE, RESTORE, APPROVE, REJECT, EXPORT, LOGIN
-  timestamp  DateTime @default(now())
-  ipAddress  String?
-  oldValue   String?  // JSON text
-  newValue   String?  // JSON text
+model Project {
+  id              Int             @id @default(autoincrement())
+  name            String
+  code            String          @unique
+  description     String?
+  owner           String
+  businessUnit    String?
+  status          String          @default("ACTIVE")
+  costCenter      String?
+  tags            String?
+  billingProvider String          @default("AWS")
+  awsAccount      String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  resources       CloudResource[]
+  invoices        Invoice[]
 }
 
-model ActivityLog {
-  id          Int      @id @default(autoincrement())
-  userId      Int?
-  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  description String
-  timestamp   DateTime @default(now())
-}
-
-model Notification {
-  id        Int      @id @default(autoincrement())
-  userId    Int
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  message   String
-  read      Boolean  @default(false)
-  createdAt DateTime @default(now())
-}
-
-model Setting {
-  id          Int     @id @default(autoincrement())
-  key         String  @unique
-  value       String
-  description String?
+model CloudResource {
+  id               Int      @id @default(autoincrement())
+  projectId        Int
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  instanceName     String
+  resourceType     String
+  instanceType     String?
+  vcpus            Int      @default(0)
+  memory           Float    @default(0.0)
+  storage          Float    @default(0.0)
+  availabilityZone String?
+  privateIp        String?
+  publicIp         String?
+  os               String?
+  monitoring       Boolean  @default(false)
+  monthlyCost      Float    @default(0.0)
+  billingSeats     Int?
+  billingUnit      String?
+  status           String   @default("RUNNING")
+  tags             String?
+  environment      String   @default("Production")
+  region           String   @default("us-east-1")
+  tool             String   @default("AWS")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }

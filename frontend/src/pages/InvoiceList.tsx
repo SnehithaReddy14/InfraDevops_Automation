@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Search,
@@ -11,16 +11,21 @@ import {
   Download,
   ChevronLeft,
   ChevronRight,
-  SlidersHorizontal,
   Check,
   RefreshCw,
-  FolderOpen
+  FolderOpen,
+  MoreVertical
 } from 'lucide-react';
 import api from '../utils/api';
+import { navigateWithReturn } from '../utils/navigation';
 import { useAuth } from '../context/useAuth';
+import { MonthPeriodFilter, type MonthPeriodValue } from '../components/MonthPeriodFilter';
+import { monthRangeToDateBounds } from '../utils/monthPeriod';
 
 export const InvoiceList: React.FC = () => {
   const navigate = useNavigate();
+  const location = useLocation();
+  const listReturnPath = `${location.pathname}${location.search}`;
   const queryClient = useQueryClient();
   const { user } = useAuth();
 
@@ -38,19 +43,30 @@ export const InvoiceList: React.FC = () => {
   const [maxAmount, setMaxAmount] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [invoicePeriod, setInvoicePeriod] = useState<MonthPeriodValue>({ fromMonth: null, toMonth: null });
+
+  const handlePeriodChange = (period: MonthPeriodValue) => {
+    setInvoicePeriod(period);
+    const { startDate: s, endDate: e } = monthRangeToDateBounds(period.fromMonth, period.toMonth);
+    setStartDate(s);
+    setEndDate(e);
+    setPage(1);
+  };
 
   // Table selections
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [columnVisibility, setColumnVisibility] = useState({
+  const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+  const columnVisibility = {
     invoiceNumber: true,
     vendorName: true,
     invoiceDate: true,
     dueDate: true,
     grandTotal: true,
     status: true,
+    paymentStatus: true,
     aiConfidence: true,
     actions: true,
-  });
+  };
 
   const queryParams = new URLSearchParams({
     page: String(page),
@@ -86,27 +102,27 @@ export const InvoiceList: React.FC = () => {
   });
 
   // Single action mutations
-  const approveMutation = useMutation({
-    mutationFn: (id: number) => api.post(`/invoices/${id}/approve`, {}),
+  const markPaidMutation = useMutation({
+    mutationFn: (id: number) => api.post('/invoices/bulk', { ids: [id], action: 'PAID' }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['invoicesList'] });
       queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
-      alert('Invoice approved successfully');
+      alert('Invoice status updated to Paid');
     },
     onError: (err: any) => {
-      alert(`Approval failed: ${err.message}`);
+      alert(`Operation failed: ${err.message}`);
     },
   });
 
-  const rejectMutation = useMutation({
-    mutationFn: (id: number) => api.post(`/invoices/${id}/reject`, {}),
+  const markUnpaidMutation = useMutation({
+    mutationFn: (id: number) => api.post('/invoices/bulk', { ids: [id], action: 'UNPAID' }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['invoicesList'] });
       queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
-      alert('Invoice rejected successfully');
+      alert('Invoice status updated to Unpaid');
     },
     onError: (err: any) => {
-      alert(`Rejection failed: ${err.message}`);
+      alert(`Operation failed: ${err.message}`);
     },
   });
 
@@ -141,6 +157,15 @@ export const InvoiceList: React.FC = () => {
     if (action === 'DELETE' && !window.confirm(`Are you sure you want to delete these ${selectedIds.length} invoices?`)) {
       return;
     }
+    if (['PAID', 'UNPAID'].includes(action)) {
+      const allInvoices = data?.invoices || [];
+      const selectedInvoices = allInvoices.filter((inv: any) => selectedIds.includes(inv.id));
+      const invalid = selectedInvoices.some((inv: any) => inv.status === 'REJECTED' || inv.status === 'DRAFT');
+      if (invalid) {
+        alert('Cannot update payment status for draft or rejected invoices.');
+        return;
+      }
+    }
     bulkActionMutation.mutate({ ids: selectedIds, action });
   };
 
@@ -171,10 +196,36 @@ export const InvoiceList: React.FC = () => {
     }
   };
 
-  const formatCurrency = (val: number, curr: string = 'INR') => {
-    return new Intl.NumberFormat('en-IN', {
+  const { data: fxRateData } = useQuery({
+    queryKey: ['exchange-rate'],
+    queryFn: async () => api.get('/exchange-rate') as Promise<{ inrPerUsd: number }>,
+    staleTime: 60 * 60 * 1000,
+  });
+
+  const inrPerUsd = fxRateData?.inrPerUsd ?? 83.5;
+
+  const EXCHANGE_RATES: Record<string, number> = {
+    USD: 1.0,
+    INR: inrPerUsd,
+    EUR: 0.92,
+    GBP: 0.78,
+  };
+
+  const convertCurrency = (amount: number, from: string | null | undefined, to: string): number => {
+    const fromUpper = (from || 'USD').toUpperCase();
+    const toUpper = (to || 'USD').toUpperCase();
+    if (fromUpper === toUpper) return amount;
+    const rateFrom = EXCHANGE_RATES[fromUpper] || 1.0;
+    const rateTo = EXCHANGE_RATES[toUpper] || 1.0;
+    return (amount / rateFrom) * rateTo;
+  };
+
+  const formatCurrency = (val: number, curr?: string) => {
+    const defaultCurrency = localStorage.getItem('invoice_default_currency') || 'USD';
+    const displayCurrency = curr || defaultCurrency;
+    return new Intl.NumberFormat(displayCurrency === 'INR' ? 'en-IN' : 'en-US', {
       style: 'currency',
-      currency: curr,
+      currency: displayCurrency,
       maximumFractionDigits: 0
     }).format(val);
   };
@@ -182,15 +233,22 @@ export const InvoiceList: React.FC = () => {
   const getStatusBadge = (s: string) => {
     const styles: Record<string, string> = {
       DRAFT: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
-      PENDING_REVIEW: 'bg-warning/10 text-warning dark:bg-warning/20',
+      SAVED: 'bg-success/10 text-success dark:bg-success/20',
+      SCANNED: 'bg-success/10 text-success dark:bg-success/20',
+      PENDING_REVIEW: 'bg-success/10 text-success dark:bg-success/20',
       APPROVED: 'bg-success/10 text-success dark:bg-success/20',
       REJECTED: 'bg-danger/10 text-danger dark:bg-danger/20',
-      PAID: 'bg-indigo-500/10 text-indigo-500',
-      UNPAID: 'bg-amber-500/10 text-amber-500',
+      PAID: 'bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20',
+      UNPAID: 'bg-orange-500/10 text-orange-600 dark:bg-orange-500/20',
     };
+    const label = s === 'PENDING_REVIEW' ? 'Saved' : s;
     return (
-      <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${styles[s] || styles.DRAFT}`}>
-        {s.replace('_', ' ')}
+      <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${styles[s] || styles.SAVED}`}>
+        {label
+          .toLowerCase()
+          .split('_')
+          .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+          .join(' ')}
       </span>
     );
   };
@@ -233,10 +291,10 @@ export const InvoiceList: React.FC = () => {
           </div>
           
           <button
-            onClick={() => navigate('/upload')}
+            onClick={() => navigate('/projects')}
             className="px-4 py-2 bg-primary hover:bg-primary-hover text-white rounded-lg text-sm font-semibold shadow-md shadow-primary/15 transition-all duration-200 hover:-translate-y-0.5"
           >
-            Upload New
+            Upload in Project
           </button>
         </div>
       </div>
@@ -269,12 +327,10 @@ export const InvoiceList: React.FC = () => {
             className="px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm font-semibold text-slate-700 dark:text-slate-300 focus:outline-none"
           >
             <option value="">All Statuses</option>
-            <option value="DRAFT">Draft</option>
-            <option value="PENDING_REVIEW">Pending Review</option>
-            <option value="APPROVED">Approved</option>
-            <option value="REJECTED">Rejected</option>
+            <option value="SAVED">Saved</option>
             <option value="PAID">Paid</option>
             <option value="UNPAID">Unpaid</option>
+            <option value="REJECTED">Rejected</option>
           </select>
 
           <button
@@ -290,6 +346,8 @@ export const InvoiceList: React.FC = () => {
           </button>
         </div>
       </div>
+
+      <MonthPeriodFilter value={invoicePeriod} onChange={handlePeriodChange} />
 
       {/* Advanced Filter Drawer */}
       {showFilters && (
@@ -346,20 +404,6 @@ export const InvoiceList: React.FC = () => {
             {canManage && (
               <>
                 <button
-                  onClick={() => handleBulkAction('APPROVE')}
-                  className="flex items-center space-x-1.5 px-3 py-1.5 bg-success hover:bg-success/90 text-white rounded-lg text-xs font-bold transition-all shadow-sm shadow-success/15"
-                >
-                  <CheckCircle size={14} />
-                  <span>Approve</span>
-                </button>
-                <button
-                  onClick={() => handleBulkAction('REJECT')}
-                  className="flex items-center space-x-1.5 px-3 py-1.5 bg-danger hover:bg-danger/90 text-white rounded-lg text-xs font-bold transition-all shadow-sm shadow-danger/15"
-                >
-                  <XCircle size={14} />
-                  <span>Reject</span>
-                </button>
-                <button
                   onClick={() => handleBulkAction('DELETE')}
                   className="flex items-center space-x-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition-all shadow-sm"
                 >
@@ -403,7 +447,7 @@ export const InvoiceList: React.FC = () => {
             <table className="w-full text-left border-collapse min-w-[900px]">
               <thead>
                 <tr className="border-b border-slate-200 dark:border-slate-800 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 bg-slate-50/70 dark:bg-slate-900/10">
-                  <th className="py-4.5 px-4 w-12">
+                  <th className="py-5.5 px-5 w-12">
                     <input
                       type="checkbox"
                       onChange={(e) => handleSelectAll(e, data.invoices)}
@@ -414,41 +458,46 @@ export const InvoiceList: React.FC = () => {
                     />
                   </th>
                   {columnVisibility.invoiceNumber && (
-                    <th onClick={() => toggleSort('invoiceNumber')} className="py-4.5 px-4 cursor-pointer hover:bg-slate-100/50">
+                    <th onClick={() => toggleSort('invoiceNumber')} className="py-5.5 px-5 cursor-pointer hover:bg-slate-100/50">
                       Invoice # {sortBy === 'invoiceNumber' && (sortOrder === 'desc' ? '↓' : '↑')}
                     </th>
                   )}
                   {columnVisibility.vendorName && (
-                    <th onClick={() => toggleSort('vendorName')} className="py-4.5 px-4 cursor-pointer hover:bg-slate-100/50">
+                    <th onClick={() => toggleSort('vendorName')} className="py-5.5 px-5 cursor-pointer hover:bg-slate-100/50">
                       Vendor {sortBy === 'vendorName' && (sortOrder === 'desc' ? '↓' : '↑')}
                     </th>
                   )}
                   {columnVisibility.invoiceDate && (
-                    <th onClick={() => toggleSort('invoiceDate')} className="py-4.5 px-4 cursor-pointer hover:bg-slate-100/50">
-                      Date {sortBy === 'invoiceDate' && (sortOrder === 'desc' ? '↓' : '↑')}
+                    <th onClick={() => toggleSort('invoiceDate')} className="py-5.5 px-5 cursor-pointer hover:bg-slate-100/50">
+                      Billing Period {sortBy === 'invoiceDate' && (sortOrder === 'desc' ? '↓' : '↑')}
                     </th>
                   )}
                   {columnVisibility.dueDate && (
-                    <th onClick={() => toggleSort('dueDate')} className="py-4.5 px-4 cursor-pointer hover:bg-slate-100/50">
+                    <th onClick={() => toggleSort('dueDate')} className="py-5.5 px-5 cursor-pointer hover:bg-slate-100/50">
                       Due Date {sortBy === 'dueDate' && (sortOrder === 'desc' ? '↓' : '↑')}
                     </th>
                   )}
                   {columnVisibility.grandTotal && (
-                    <th onClick={() => toggleSort('grandTotal')} className="py-4.5 px-4 cursor-pointer hover:bg-slate-100/50">
+                    <th onClick={() => toggleSort('grandTotal')} className="py-5.5 px-5 text-right cursor-pointer hover:bg-slate-100/50">
                       Grand Total {sortBy === 'grandTotal' && (sortOrder === 'desc' ? '↓' : '↑')}
                     </th>
                   )}
                   {columnVisibility.status && (
-                    <th onClick={() => toggleSort('status')} className="py-4.5 px-4 cursor-pointer hover:bg-slate-100/50">
+                    <th onClick={() => toggleSort('status')} className="py-5.5 px-5 cursor-pointer hover:bg-slate-100/50">
                       Status {sortBy === 'status' && (sortOrder === 'desc' ? '↓' : '↑')}
                     </th>
                   )}
+                  {columnVisibility.paymentStatus && (
+                    <th className="py-5.5 px-5 select-none">
+                      Payment
+                    </th>
+                  )}
                   {columnVisibility.aiConfidence && (
-                    <th onClick={() => toggleSort('aiConfidenceScore')} className="py-4.5 px-4 cursor-pointer hover:bg-slate-100/50 text-center">
+                    <th onClick={() => toggleSort('aiConfidenceScore')} className="py-5.5 px-5 cursor-pointer hover:bg-slate-100/50 text-center">
                       AI Confidence {sortBy === 'aiConfidenceScore' && (sortOrder === 'desc' ? '↓' : '↑')}
                     </th>
                   )}
-                  {columnVisibility.actions && <th className="py-4.5 px-4 text-right">Actions</th>}
+                  {columnVisibility.actions && <th className="py-5.5 px-5 text-right">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
@@ -461,7 +510,7 @@ export const InvoiceList: React.FC = () => {
                         isRowSelected ? 'bg-primary/2 dark:bg-primary/5' : ''
                       }`}
                     >
-                      <td className="py-4.5 px-4">
+                      <td className="py-5.5 px-5">
                         <input
                           type="checkbox"
                           checked={isRowSelected}
@@ -470,42 +519,63 @@ export const InvoiceList: React.FC = () => {
                         />
                       </td>
                       {columnVisibility.invoiceNumber && (
-                        <td className="py-4.5 px-4 font-semibold text-slate-800 dark:text-white">
+                        <td className="py-5.5 px-5 font-semibold text-slate-800 dark:text-white">
                           {row.invoiceNumber}
                         </td>
                       )}
                       {columnVisibility.vendorName && (
-                        <td className="py-4.5 px-4 text-slate-600 dark:text-slate-300">
+                        <td className="py-5.5 px-5 text-slate-650 dark:text-slate-300 font-medium">
                           {row.vendorName || 'Unknown Vendor'}
                         </td>
                       )}
                       {columnVisibility.invoiceDate && (
-                        <td className="py-4.5 px-4 text-slate-600 dark:text-slate-400">
-                          {row.invoiceDate ? new Date(row.invoiceDate).toLocaleDateString() : 'N/A'}
+                        <td className="py-5.5 px-5 text-slate-600 dark:text-slate-400 font-semibold">
+                          {row.billingPeriod || (row.invoiceDate ? new Date(row.invoiceDate).toLocaleDateString('default', { month: 'short', year: 'numeric' }) : 'N/A')}
                         </td>
                       )}
                       {columnVisibility.dueDate && (
-                        <td className="py-4.5 px-4 text-slate-600 dark:text-slate-400">
+                        <td className="py-5.5 px-5 text-slate-600 dark:text-slate-400 font-medium">
                           {row.dueDate ? new Date(row.dueDate).toLocaleDateString() : 'N/A'}
                         </td>
                       )}
                       {columnVisibility.grandTotal && (
-                        <td className="py-4.5 px-4 font-bold text-slate-800 dark:text-white">
-                          {formatCurrency(row.grandTotal, row.currency)}
+                        <td className="py-5.5 px-5 text-right font-bold text-slate-800 dark:text-white">
+                          {(() => {
+                            const defaultCurrency = localStorage.getItem('invoice_default_currency') || 'USD';
+                            const convertedVal = convertCurrency(row.grandTotal, row.currency, defaultCurrency);
+                            return formatCurrency(convertedVal, defaultCurrency);
+                          })()}
                         </td>
                       )}
                       {columnVisibility.status && (
-                        <td className="py-4.5 px-4">{getStatusBadge(row.status)}</td>
+                        <td className="py-5.5 px-5">{getStatusBadge(row.status)}</td>
+                      )}
+                      {columnVisibility.paymentStatus && (
+                        <td className="py-5.5 px-5 font-semibold">
+                          {row.status === 'PAID' ? (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 dark:bg-indigo-950/20 dark:text-indigo-300 border border-indigo-500/20">
+                              Paid
+                            </span>
+                          ) : ['APPROVED', 'UNPAID'].includes(row.status) ? (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-50 text-orange-700 dark:bg-orange-950/20 dark:text-orange-300 border border-orange-500/20">
+                              Unpaid
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 dark:text-slate-650 font-normal">
+                              —
+                            </span>
+                          )}
+                        </td>
                       )}
                       {columnVisibility.aiConfidence && (
-                        <td className="py-4.5 px-4 text-center">
+                        <td className="py-5.5 px-5 text-center">
                           <span
-                            className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                            className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
                               row.aiConfidenceScore > 0.8
-                                ? 'bg-success-light text-success-dark'
+                                ? 'bg-success/10 text-success dark:bg-success/20'
                                 : row.aiConfidenceScore > 0.6
-                                ? 'bg-warning-light text-warning-dark'
-                                : 'bg-danger-light text-danger-dark'
+                                ? 'bg-warning/10 text-warning dark:bg-warning/20'
+                                : 'bg-danger/10 text-danger dark:bg-danger/20'
                             }`}
                           >
                             {(row.aiConfidenceScore * 100).toFixed(0)}%
@@ -513,45 +583,97 @@ export const InvoiceList: React.FC = () => {
                         </td>
                       )}
                       {columnVisibility.actions && (
-                        <td className="py-4.5 px-4 text-right space-x-1.5">
-                          <button
-                            onClick={() => navigate(`/invoices/${row.id}`)}
-                            className="p-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition-colors inline-flex"
-                            title="Verify Split-Screen"
-                          >
-                            <Eye size={14} />
-                          </button>
-                          {canManage && row.status === 'PENDING_REVIEW' && (
-                            <>
-                              <button
-                                onClick={() => approveMutation.mutate(row.id)}
-                                className="p-1 rounded-lg border border-success/30 bg-success/5 hover:bg-success/15 text-success transition-colors inline-flex"
-                                title="Approve"
-                              >
-                                <CheckCircle size={14} />
-                              </button>
-                              <button
-                                onClick={() => rejectMutation.mutate(row.id)}
-                                className="p-1 rounded-lg border border-danger/30 bg-danger/5 hover:bg-danger/15 text-danger transition-colors inline-flex"
-                                title="Reject"
-                              >
-                                <XCircle size={14} />
-                              </button>
-                            </>
-                          )}
-                          {canManage && (
+                        <td className="py-5.5 px-5 text-right relative" onClick={e => e.stopPropagation()}>
+                          <div className="inline-block text-left">
                             <button
-                              onClick={() => {
-                                if (window.confirm('Delete this invoice?')) {
-                                  deleteMutation.mutate(row.id);
-                                }
-                              }}
-                              className="p-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-red-50 hover:text-red-500 text-slate-500 dark:text-slate-400 transition-colors inline-flex"
-                              title="Delete"
+                              onClick={() => setOpenMenuId(openMenuId === row.id ? null : row.id)}
+                              className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition-colors inline-flex"
+                              title="More options"
                             >
-                              <Trash2 size={14} />
+                              <MoreVertical size={14} />
                             </button>
-                          )}
+
+                            {openMenuId === row.id && (
+                              <>
+                                <div 
+                                  className="fixed inset-0 z-20" 
+                                  onClick={() => setOpenMenuId(null)} 
+                                />
+                                
+                                <div
+                                  className="absolute right-4 mt-1.5 w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg ring-1 ring-black ring-opacity-5 z-30 focus:outline-none overflow-hidden text-left"
+                                >
+                                  <div className="py-1">
+                                    <button
+                                      onClick={() => {
+                                        setOpenMenuId(null);
+                                        navigateWithReturn(
+                                          navigate,
+                                          `/invoices/${row.id}`,
+                                          listReturnPath,
+                                          {
+                                            breadcrumbs: [
+                                              { label: 'Dashboard', path: '/dashboard' },
+                                              { label: 'Invoices', path: '/invoices' },
+                                              {
+                                                label: row.invoiceNumber || `Invoice ${row.id}`,
+                                                path: `/invoices/${row.id}`,
+                                              },
+                                            ],
+                                          }
+                                        );
+                                      }}
+                                      className="flex items-center space-x-2 w-full px-3 py-2 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
+                                    >
+                                      <Eye size={12} className="text-slate-400" />
+                                      <span>View Details</span>
+                                    </button>
+
+                                    {canManage && !['REJECTED', 'DRAFT'].includes(row.status) && row.status !== 'PAID' && (
+                                      <button
+                                        onClick={() => {
+                                          setOpenMenuId(null);
+                                          markPaidMutation.mutate(row.id);
+                                        }}
+                                        className="flex items-center space-x-2 w-full px-3 py-2 text-xs text-indigo-600 dark:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
+                                      >
+                                        <CheckCircle size={12} className="text-indigo-500" />
+                                        <span>Mark Paid</span>
+                                      </button>
+                                    )}
+
+                                    {canManage && row.status === 'PAID' && (
+                                      <button
+                                        onClick={() => {
+                                          setOpenMenuId(null);
+                                          markUnpaidMutation.mutate(row.id);
+                                        }}
+                                        className="flex items-center space-x-2 w-full px-3 py-2 text-xs text-orange-600 dark:text-orange-450 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
+                                      >
+                                        <XCircle size={12} className="text-orange-500" />
+                                        <span>Mark Unpaid</span>
+                                      </button>
+                                    )}
+
+                                    {canManage && (
+                                      <button
+                                        onClick={() => {
+                                          setOpenMenuId(null);
+                                          if (window.confirm('Delete this invoice?')) {
+                                            deleteMutation.mutate(row.id);
+                                          }
+                                        }}
+                                        className="flex items-center space-x-2 w-full px-3 py-2 text-xs text-red-600 dark:text-red-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold border-t border-slate-100 dark:border-slate-800"
+                                      >
+                                        <Trash2 size={12} className="text-red-500" />
+                                        <span>Delete</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
                         </td>
                       )}
                     </tr>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   ZoomIn,
@@ -7,34 +7,37 @@ import {
   RotateCw,
   Download,
   Trash2,
-  CheckCircle,
-  XCircle,
   Plus,
   Copy,
   Undo,
-  RotateCcw,
   Save,
   ChevronLeft,
   Loader2,
   FileText,
   AlertCircle
 } from 'lucide-react';
-import api from '../utils/api';
-import { useAuth } from '../context/useAuth';
+import api, { getServerBaseUrl } from '../utils/api';
+import { goBack } from '../utils/navigation';
+import {
+  isSubscriptionInvoice,
+  readSubscriptionLines,
+  formatBillingSeats,
+  billingUnitLabel,
+} from '../utils/saasUtils';
 
 export const InvoiceDetail: React.FC = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
-  const { user } = useAuth();
   
   const invoiceId = parseInt(id || '');
 
-  // Left panel view states
+  // Document zoom & rotation states
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
 
-  // Form states
+  // Form editing states
   const [formData, setFormData] = useState<any>(null);
   const [lineItems, setLineItems] = useState<any[]>([]);
   const [modifiedFields, setModifiedFields] = useState<Record<string, boolean>>({});
@@ -45,10 +48,10 @@ export const InvoiceDetail: React.FC = () => {
     enabled: !isNaN(invoiceId),
   });
 
-  // Populate form states once data loads
+  // Load backend variables into state
   useEffect(() => {
-    if (data?.invoice) {
-      const inv = data.invoice;
+    const inv = data?.invoice || data;
+    if (inv) {
       setFormData({
         invoiceNumber: inv.invoiceNumber || '',
         invoiceDate: inv.invoiceDate ? inv.invoiceDate.split('T')[0] : '',
@@ -68,6 +71,7 @@ export const InvoiceDetail: React.FC = () => {
         discount: inv.discount || 0,
         tax: inv.tax || 0,
         shipping: inv.shipping || 0,
+        billingPeriod: inv.billingPeriod || '',
       });
       setLineItems(inv.items || []);
       setModifiedFields({});
@@ -87,64 +91,63 @@ export const InvoiceDetail: React.FC = () => {
     },
   });
 
-  const approveMutation = useMutation({
-    mutationFn: () => api.post(`/invoices/${invoiceId}/approve`, {}),
+  const deleteMutation = useMutation({
+    mutationFn: () => api.delete(`/invoices/${invoiceId}`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['invoiceDetail', invoiceId] });
       queryClient.invalidateQueries({ queryKey: ['invoicesList'] });
-      alert('Invoice approved successfully');
-      navigate('/invoices');
+      const cached = queryClient.getQueryData(['invoiceDetail', invoiceId]) as { invoice?: { projectId?: number }; projectId?: number } | undefined;
+      const projectId = cached?.invoice?.projectId ?? cached?.projectId;
+      goBack(navigate, location, {
+        projectId,
+        defaultPath: projectId ? `/projects/${projectId}?tab=invoices` : '/invoices',
+      });
     },
     onError: (err: any) => {
-      alert(`Approval failed: ${err.message}`);
+      alert(`Delete failed: ${err.message}`);
     },
   });
 
-  const rejectMutation = useMutation({
-    mutationFn: () => api.post(`/invoices/${invoiceId}/reject`, {}),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['invoiceDetail', invoiceId] });
-      queryClient.invalidateQueries({ queryKey: ['invoicesList'] });
-      alert('Invoice rejected successfully');
-      navigate('/invoices');
-    },
-    onError: (err: any) => {
-      alert(`Rejection failed: ${err.message}`);
-    },
-  });
+  const invoiceRecord = data?.invoice || data;
 
   if (isLoading || isNaN(invoiceId)) {
     return (
       <div className="flex flex-col items-center justify-center py-40">
-        <Loader2 className="w-12 h-12 text-primary animate-spin mb-4" />
-        <span className="text-sm font-semibold text-slate-500">Retrieving details and files...</span>
+        <Loader2 className="w-12 h-12 text-indigo-500 animate-spin mb-4" />
+        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Retrieving ledger and document files...</span>
       </div>
     );
   }
 
-  if (error || !data?.invoice) {
+  if (error || !invoiceRecord) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-center">
-        <AlertCircle className="w-16 h-16 text-red-500 mb-4" />
-        <h2 className="text-xl font-bold">Failed to load invoice</h2>
-        <p className="text-slate-500 max-w-sm mt-2">
+      <div className="flex flex-col items-center justify-center py-20 text-center glass-card rounded-2xl p-8 max-w-md mx-auto">
+        <AlertCircle className="w-16 h-16 text-rose-500 mb-4 animate-pulse" />
+        <h2 className="text-xl font-bold text-slate-800 dark:text-white">Failed to load invoice</h2>
+        <p className="text-slate-500 max-w-sm mt-2 text-sm">
           Make sure the record exists and your server is reachable.
         </p>
       </div>
     );
   }
 
-  const invoice = data.invoice;
-  const isPending = invoice.status === 'PENDING_REVIEW';
-  const canManage = user?.role === 'ADMIN' || user?.role === 'FINANCE_MANAGER';
+  const invoice = invoiceRecord;
+  const subscriptionLines = readSubscriptionLines(invoice.metadata);
+  const isSubscription = isSubscriptionInvoice(invoice.vendorName, invoice.metadata);
 
-  // Handle standard field edits
+  const handleBack = () => {
+    goBack(navigate, location, {
+      projectId: invoice.projectId,
+      defaultPath: '/invoices',
+    });
+  };
+
+  const isSavedStatus = ['SAVED', 'SCANNED', 'APPROVED', 'PAID', 'UNPAID'].includes(invoice.status);
+
   const handleFieldChange = (field: string, value: any) => {
     setFormData((prev: any) => ({ ...prev, [field]: value }));
     setModifiedFields((prev) => ({ ...prev, [field]: true }));
   };
 
-  // Line item grid operations
   const handleItemChange = (index: number, key: string, value: any) => {
     const newItems = [...lineItems];
     newItems[index] = { ...newItems[index], [key]: value };
@@ -168,8 +171,7 @@ export const InvoiceDetail: React.FC = () => {
     setModifiedFields((prev) => ({ ...prev, items: true }));
   };
 
-  // Compute calculated values
-  const subtotal = lineItems.reduce((acc, curr) => acc + (parseFloat(curr.quantity) * parseFloat(curr.unitPrice) || 0), 0);
+  const subtotal = lineItems.reduce((acc, curr) => acc + ((parseFloat(curr.quantity) || 1) * (parseFloat(curr.unitPrice) || 0)), 0);
   const grandTotal = subtotal - (parseFloat(formData?.discount) || 0) + (parseFloat(formData?.tax) || 0) + (parseFloat(formData?.shipping) || 0);
 
   const handleReset = () => {
@@ -194,6 +196,7 @@ export const InvoiceDetail: React.FC = () => {
         discount: inv.discount || 0,
         tax: inv.tax || 0,
         shipping: inv.shipping || 0,
+        billingPeriod: inv.billingPeriod || '',
       });
       setLineItems(inv.items || []);
       setModifiedFields({});
@@ -208,136 +211,137 @@ export const InvoiceDetail: React.FC = () => {
     updateMutation.mutate(payload);
   };
 
-  // Check if fields were AI extracted vs modified
   const getFieldHighlight = (field: string) => {
     if (modifiedFields[field]) {
-      return 'border-amber-400 focus:ring-amber-300 dark:border-amber-700/50 bg-amber-50/5 dark:bg-amber-950/5';
+      return 'border-amber-400/50 focus:ring-amber-400/10 focus:border-amber-400 bg-amber-500/2 dark:bg-amber-500/5';
     }
-    // Highlighting extracted fields on load in green
-    return 'border-green-400 focus:ring-green-300 dark:border-green-700/50 bg-green-50/5 dark:bg-green-950/5';
+    return 'border-emerald-500/30 focus:ring-emerald-500/10 focus:border-emerald-500 bg-emerald-500/2 dark:bg-emerald-500/5';
   };
 
-  const fileUrl = `http://localhost:5000${invoice.originalFilePath}`;
+  const fileUrl = invoice.originalFilePath
+    ? `${getServerBaseUrl()}${invoice.originalFilePath}`
+    : '';
   const isPdf = invoice.originalFilePath?.toLowerCase().endsWith('.pdf');
 
   return (
     <div className="space-y-6">
-      {/* Top Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-4">
+      {/* Top Header Controls */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-200 dark:border-[#1F1F1F] pb-4.5">
         <div className="flex items-center space-x-3">
           <button
-            onClick={() => navigate('/invoices')}
-            className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            onClick={handleBack}
+            className="p-2.5 rounded-xl border border-slate-200 dark:border-[#1F1F1F] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition-colors"
+            title="Go back"
           >
-            <ChevronLeft size={16} />
+            <ChevronLeft size={15} />
           </button>
           <div>
-            <h1 className="text-xl font-bold text-slate-900 dark:text-white flex items-center space-x-2">
+            <h1 className="text-xl font-bold text-slate-800 dark:text-white flex items-center space-x-2">
               <span>Verify Invoice: {invoice.invoiceNumber}</span>
-              <span className={`px-2 py-0.5 rounded-full text-2xs font-extrabold ${
-                invoice.status === 'APPROVED' ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'
+              <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
+                isSavedStatus
+                  ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' 
+                  : invoice.status === 'REJECTED'
+                  ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20'
+                  : 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
               }`}>
-                {invoice.status}
+                {invoice.status
+                  .toLowerCase()
+                  .split('_')
+                  .map((word: string) => word.charAt(0).toUpperCase() + word.slice(1))
+                  .join(' ')}
               </span>
             </h1>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Source file: {invoice.originalFilePath?.split('/').pop()} • AI Confidence: {(invoice.aiConfidenceScore * 100).toFixed(0)}%
+            <p className="text-[10px] uppercase font-bold text-slate-400 dark:text-slate-550 mt-1">
+              Source file: {invoice.originalFilePath?.split('/').pop()} • AI Confidence Score: {(invoice.aiConfidenceScore * 100).toFixed(0)}%
             </p>
           </div>
         </div>
 
-        {/* Approval buttons */}
-        <div className="flex items-center space-x-3">
-          {canManage && isPending && (
-            <>
-              <button
-                onClick={() => approveMutation.mutate()}
-                className="flex items-center space-x-1.5 px-4 py-2 bg-success hover:bg-success/90 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-success/15"
-              >
-                <CheckCircle size={14} />
-                <span>Approve Invoice</span>
-              </button>
-              <button
-                onClick={() => rejectMutation.mutate()}
-                className="flex items-center space-x-1.5 px-4 py-2 bg-danger hover:bg-danger/90 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-danger/15"
-              >
-                <XCircle size={14} />
-                <span>Reject</span>
-              </button>
-            </>
-          )}
-
+        {/* Form state save buttons */}
+        <div className="flex items-center space-x-2.5">
           <button
             onClick={handleReset}
             disabled={Object.keys(modifiedFields).length === 0}
-            className="flex items-center space-x-1 px-3 py-2 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors"
+            className="flex items-center space-x-1.5 px-3.5 py-2.5 border border-slate-205 dark:border-[#1F1F1F] rounded-xl text-xs font-semibold text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors"
           >
             <Undo size={14} />
             <span>Reset</span>
           </button>
           
           <button
+            onClick={() => {
+              if (window.confirm('Delete this invoice permanently?')) {
+                deleteMutation.mutate();
+              }
+            }}
+            disabled={deleteMutation.isPending}
+            className="flex items-center space-x-1.5 px-3.5 py-2.5 border border-rose-200 dark:border-rose-900/40 rounded-xl text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 disabled:opacity-50 transition-colors"
+          >
+            {deleteMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+            <span>Delete</span>
+          </button>
+
+          <button
             onClick={handleSave}
             disabled={Object.keys(modifiedFields).length === 0 || updateMutation.isPending}
-            className="flex items-center space-x-1.5 px-4 py-2 bg-primary hover:bg-primary-hover text-white rounded-lg text-xs font-bold shadow-md disabled:opacity-50 disabled:translate-y-0 transition-all duration-200"
+            className="flex items-center space-x-1.5 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-md disabled:opacity-50 transition-all duration-250"
           >
             {updateMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-            <span>Save Ledger</span>
+            <span>Save Details</span>
           </button>
         </div>
       </div>
 
       {/* Split Screen Container */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-180px)] min-h-[500px]">
-        {/* Left Side: Document Viewer */}
-        <div className="lg:col-span-5 glass-card rounded-xl shadow-premium border border-slate-200/60 dark:border-slate-800/80 flex flex-col overflow-hidden bg-slate-900/10">
-          {/* Controls Bar */}
-          <div className="p-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center space-x-1.5">
-              <FileText size={14} className="text-primary" />
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-190px)] min-h-[500px]">
+        {/* Left Side: Document Preview Iframe */}
+        <div className="lg:col-span-5 glass-card rounded-2xl overflow-hidden flex flex-col bg-slate-50 dark:bg-[#121212]">
+          <div className="p-3 border-b border-slate-200 dark:border-[#1F1F1F] bg-white dark:bg-[#121212]/80 flex items-center justify-between">
+            <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider flex items-center space-x-2">
+              <FileText size={13} className="text-indigo-500" />
               <span>Original Document</span>
             </span>
 
             <div className="flex items-center space-x-2">
               <button
                 onClick={() => setZoom((prev) => Math.max(0.5, prev - 0.1))}
-                className="p-1.5 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400"
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400"
                 title="Zoom Out"
               >
-                <ZoomOut size={14} />
+                <ZoomOut size={13} />
               </button>
               <button
                 onClick={() => setZoom((prev) => Math.min(2, prev + 0.1))}
-                className="p-1.5 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400"
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400"
                 title="Zoom In"
               >
-                <ZoomIn size={14} />
+                <ZoomIn size={13} />
               </button>
               <button
                 onClick={() => setRotation((prev) => (prev + 90) % 360)}
-                className="p-1.5 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400"
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400"
                 title="Rotate Clockwise"
               >
-                <RotateCw size={14} />
+                <RotateCw size={13} />
               </button>
               <a
                 href={fileUrl}
                 download
-                className="p-1.5 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400"
-                title="Download Source"
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400"
+                title="Download Document"
               >
-                <Download size={14} />
+                <Download size={13} />
               </a>
             </div>
           </div>
 
-          {/* Render Embed or Image */}
-          <div className="flex-1 overflow-auto p-4 flex items-center justify-center relative bg-slate-100 dark:bg-slate-950">
+          <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-slate-100 dark:bg-[#080d19]">
             {isPdf ? (
               <iframe
                 src={`${fileUrl}#zoom=${zoom * 100}&rotate=${rotation}`}
-                className="w-full h-full border-none rounded-lg"
-                title="PDF Document"
+                className="w-full h-full border-none rounded-xl"
+                title="PDF File Preview"
               />
             ) : (
               <div
@@ -349,28 +353,28 @@ export const InvoiceDetail: React.FC = () => {
               >
                 <img
                   src={fileUrl}
-                  alt="Extracted invoice source"
-                  className="max-w-full max-h-full rounded shadow"
+                  alt="Extracted invoice data source"
+                  className="max-w-full max-h-full rounded-xl shadow-lg border border-slate-200 dark:border-slate-800/80"
                 />
               </div>
             )}
           </div>
         </div>
 
-        {/* Right Side: Zod validated Form */}
-        <div className="lg:col-span-7 glass-card rounded-xl shadow-premium border border-slate-200/60 dark:border-slate-800/80 flex flex-col overflow-hidden bg-white dark:bg-slate-900">
-          <div className="p-3.5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-              Extracted Invoice Data Form
+        {/* Right Side: Ledger Form Editor */}
+        <div className="lg:col-span-7 glass-card rounded-2xl overflow-hidden flex flex-col bg-white dark:bg-[#121212]">
+          <div className="px-5 py-3 border-b border-slate-150 dark:border-[#1F1F1F] flex items-center justify-between">
+            <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+              Scanned Meta Ledger
             </span>
-            <div className="flex items-center space-x-4 text-2xs font-semibold">
+            <div className="flex items-center space-x-3 text-[10px] font-bold text-slate-500">
               <div className="flex items-center space-x-1">
-                <span className="w-2.5 h-2.5 bg-green-400/25 border border-green-400 rounded-sm" />
-                <span className="text-slate-500">AI-Extracted</span>
+                <span className="w-2 h-2 bg-emerald-500/20 border border-emerald-500/50 rounded-full" />
+                <span>Extracted</span>
               </div>
               <div className="flex items-center space-x-1">
-                <span className="w-2.5 h-2.5 bg-amber-400/25 border border-amber-400 rounded-sm" />
-                <span className="text-slate-500">User-Modified</span>
+                <span className="w-2 h-2 bg-amber-500/20 border border-amber-500/50 rounded-full animate-pulse" />
+                <span>Modified</span>
               </div>
             </div>
           </div>
@@ -378,95 +382,103 @@ export const InvoiceDetail: React.FC = () => {
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             {formData && (
               <>
-                {/* 1. General Header Data */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                 {/* 1. Invoice Numbers and Dates */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] text-slate-400 dark:text-slate-500 uppercase tracking-wide">
                       Invoice Number
                     </label>
                     <input
                       type="text"
                       value={formData.invoiceNumber}
                       onChange={(e) => handleFieldChange('invoiceNumber', e.target.value)}
-                      className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 transition-all ${getFieldHighlight(
+                      className={`w-full px-3.5 py-2.5 text-xs rounded-xl border bg-transparent text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all font-semibold ${getFieldHighlight(
                         'invoiceNumber'
                       )}`}
                     />
                   </div>
-                  <div>
-                    <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] text-slate-400 dark:text-slate-500 uppercase tracking-wide">
                       Invoice Date
                     </label>
                     <input
                       type="date"
                       value={formData.invoiceDate}
                       onChange={(e) => handleFieldChange('invoiceDate', e.target.value)}
-                      className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 transition-all ${getFieldHighlight(
+                      className={`w-full px-3.5 py-2.5 text-xs rounded-xl border bg-transparent text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all font-semibold ${getFieldHighlight(
                         'invoiceDate'
                       )}`}
                     />
                   </div>
-                  <div>
-                    <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] text-slate-400 dark:text-slate-500 uppercase tracking-wide">
                       Due Date
                     </label>
                     <input
                       type="date"
                       value={formData.dueDate}
                       onChange={(e) => handleFieldChange('dueDate', e.target.value)}
-                      className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 transition-all ${getFieldHighlight(
+                      className={`w-full px-3.5 py-2.5 text-xs rounded-xl border bg-transparent text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all font-semibold ${getFieldHighlight(
                         'dueDate'
+                      )}`}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] text-slate-400 dark:text-slate-500 uppercase tracking-wide">
+                      Billing Period
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. June 2026"
+                      value={formData.billingPeriod}
+                      onChange={(e) => handleFieldChange('billingPeriod', e.target.value)}
+                      className={`w-full px-3.5 py-2.5 text-xs rounded-xl border bg-transparent text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all font-semibold ${getFieldHighlight(
+                        'billingPeriod'
                       )}`}
                     />
                   </div>
                 </div>
 
                 {/* 2. Vendor & Customer Details */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                  {/* Vendor */}
-                  <div className="space-y-4 border border-slate-100 dark:border-slate-800/80 p-4 rounded-lg bg-slate-50/10 dark:bg-slate-900/5">
-                    <h3 className="text-xs font-extrabold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                  {/* Vendor Details */}
+                  <div className="space-y-4 border border-slate-100 dark:border-slate-800/80 p-4.5 rounded-2xl bg-slate-50/5 dark:bg-slate-900/5">
+                    <h3 className="text-[10px] font-extrabold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
                       Vendor (Sender)
                     </h3>
-                    <div className="space-y-3">
-                      <div>
-                        <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                          Vendor Name
-                        </label>
+                    <div className="space-y-3.5 text-xs font-semibold">
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] text-slate-450 dark:text-slate-500">Name</label>
                         <input
                           type="text"
                           value={formData.vendorName}
                           onChange={(e) => handleFieldChange('vendorName', e.target.value)}
                           placeholder="Vendor Name"
-                          className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 transition-all ${getFieldHighlight(
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-850 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all ${getFieldHighlight(
                             'vendorName'
                           )}`}
                         />
                       </div>
-                      <div>
-                        <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                          Vendor Email
-                        </label>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] text-slate-450 dark:text-slate-500">Email Address</label>
                         <input
                           type="email"
                           value={formData.vendorEmail}
                           onChange={(e) => handleFieldChange('vendorEmail', e.target.value)}
                           placeholder="Vendor Email"
-                          className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 transition-all ${getFieldHighlight(
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-855 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all ${getFieldHighlight(
                             'vendorEmail'
                           )}`}
                         />
                       </div>
-                      <div>
-                        <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                          Vendor Address
-                        </label>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] text-slate-450 dark:text-slate-500">Physical Address</label>
                         <textarea
                           rows={2}
                           value={formData.vendorAddress}
                           onChange={(e) => handleFieldChange('vendorAddress', e.target.value)}
                           placeholder="Vendor Address"
-                          className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 transition-all ${getFieldHighlight(
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-855 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all ${getFieldHighlight(
                             'vendorAddress'
                           )}`}
                         />
@@ -474,50 +486,44 @@ export const InvoiceDetail: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Customer */}
-                  <div className="space-y-4 border border-slate-100 dark:border-slate-800/80 p-4 rounded-lg bg-slate-50/10 dark:bg-slate-900/5">
-                    <h3 className="text-xs font-extrabold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-2">
+                  {/* Customer Details */}
+                  <div className="space-y-4 border border-slate-100 dark:border-slate-800/80 p-4.5 rounded-2xl bg-slate-50/5 dark:bg-slate-900/5">
+                    <h3 className="text-[10px] font-extrabold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
                       Customer (Billing)
                     </h3>
-                    <div className="space-y-3">
-                      <div>
-                        <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                          Customer Name
-                        </label>
+                    <div className="space-y-3.5 text-xs font-semibold">
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] text-slate-455 dark:text-slate-500">Name</label>
                         <input
                           type="text"
                           value={formData.customerName}
                           onChange={(e) => handleFieldChange('customerName', e.target.value)}
                           placeholder="Customer Name"
-                          className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 transition-all ${getFieldHighlight(
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-855 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all ${getFieldHighlight(
                             'customerName'
                           )}`}
                         />
                       </div>
-                      <div>
-                        <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                          Customer Email
-                        </label>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] text-slate-455 dark:text-slate-500">Email Address</label>
                         <input
                           type="email"
                           value={formData.customerEmail}
                           onChange={(e) => handleFieldChange('customerEmail', e.target.value)}
                           placeholder="Customer Email"
-                          className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 transition-all ${getFieldHighlight(
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-855 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all ${getFieldHighlight(
                             'customerEmail'
                           )}`}
                         />
                       </div>
-                      <div>
-                        <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                          Customer Address
-                        </label>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] text-slate-455 dark:text-slate-500">Billing Address</label>
                         <textarea
                           rows={2}
                           value={formData.customerAddress}
                           onChange={(e) => handleFieldChange('customerAddress', e.target.value)}
                           placeholder="Customer Address"
-                          className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 transition-all ${getFieldHighlight(
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-855 dark:text-slate-200 focus:outline-none focus:ring-4 transition-all ${getFieldHighlight(
                             'customerAddress'
                           )}`}
                         />
@@ -526,68 +532,109 @@ export const InvoiceDetail: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 3. Line Items Grid */}
+                {/* Subscription seat breakdown (Jira / Atlassian) */}
+                {isSubscription && subscriptionLines.length > 0 && (
+                  <div className="space-y-3">
+                    <h3 className="text-[10px] font-extrabold text-slate-450 dark:text-slate-505 uppercase tracking-wide">
+                      Billed users & agents
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {subscriptionLines.map((line, idx) => (
+                        <div
+                          key={`${line.product}-${idx}`}
+                          className="rounded-xl border border-indigo-100 dark:border-indigo-900/40 bg-indigo-50/40 dark:bg-indigo-950/20 p-4 space-y-1"
+                        >
+                          <p className="text-xs font-bold text-slate-800 dark:text-slate-100 leading-snug">{line.product}</p>
+                          <p className="text-lg font-black text-indigo-700 dark:text-indigo-300">
+                            {formatBillingSeats(line.seatCount, line.billingUnit)}
+                          </p>
+                          <p className="text-xs font-semibold text-slate-600 dark:text-slate-400">
+                            Billed: {invoice.currency || 'USD'} {line.amount.toFixed(2)}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. Line Items Editor */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                    <h3 className="text-[10px] font-extrabold text-slate-450 dark:text-slate-505 uppercase tracking-wide">
                       Line Items Ledger
                     </h3>
                     <button
                       type="button"
                       onClick={handleAddItem}
-                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-50 text-slate-700 dark:text-slate-300 text-2xs font-semibold"
+                      className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl border border-slate-205 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-850 text-slate-700 dark:text-slate-300 text-[10px] font-bold"
                     >
                       <Plus size={12} />
                       <span>Add Row</span>
                     </button>
                   </div>
 
-                  <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
-                    <table className="w-full text-left border-collapse">
+                  <div className="border border-slate-200 dark:border-[#1F1F1F] rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
                       <thead>
-                        <tr className="bg-slate-50 dark:bg-slate-900/10 text-2xs font-bold text-slate-500 uppercase border-b border-slate-200 dark:border-slate-800">
-                          <th className="py-2.5 px-3">Description</th>
-                          <th className="py-2.5 px-3 w-16 text-center">Qty</th>
-                          <th className="py-2.5 px-3 w-28 text-right">Price</th>
-                          <th className="py-2.5 px-3 w-28 text-right">Amount</th>
-                          <th className="py-2.5 px-3 w-20 text-center">Action</th>
+                        <tr className="bg-[#FAFAFA] dark:bg-[#121212]/50 text-slate-450 dark:text-slate-500 font-bold border-b border-slate-200 dark:border-[#1F1F1F]">
+                          <th className="py-3 px-4">Description</th>
+                          <th className="py-3 px-4 w-24 text-center">{isSubscription ? 'Seats' : 'Qty'}</th>
+                          {isSubscription && (
+                            <th className="py-3 px-4 w-20 text-center">Unit</th>
+                          )}
+                          <th className="py-3 px-4 w-28 text-right">{isSubscription ? 'Per seat' : 'Price'}</th>
+                          <th className="py-3 px-4 w-28 text-right">Amount</th>
+                          <th className="py-3 px-4 w-20 text-center">Action</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
+                      <tbody className="divide-y divide-slate-100 dark:divide-[#1F1F1F]">
                         {lineItems.map((item, index) => (
-                          <tr key={index} className="hover:bg-slate-50/50">
-                            <td className="py-2.5 px-3">
+                          <tr key={index} className="hover:bg-slate-50/20 dark:hover:bg-slate-850/10">
+                            <td className="py-3 px-4">
                               <input
                                 type="text"
                                 value={item.description}
                                 onChange={(e) => handleItemChange(index, 'description', e.target.value)}
-                                className="w-full px-2.5 py-1 bg-slate-50/50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 focus:outline-none focus:ring-1 focus:ring-primary rounded-lg text-xs text-slate-800 dark:text-slate-200 font-medium"
+                                className="w-full px-3 py-1.5 bg-slate-50/50 dark:bg-slate-900/40 border border-slate-205 dark:border-slate-800 focus:outline-none focus:border-indigo-500 rounded-xl font-medium text-slate-800 dark:text-slate-200"
                               />
                             </td>
-                            <td className="py-2.5 px-3">
+                            <td className="py-3 px-4">
                               <input
                                 type="number"
-                                value={item.quantity}
-                                onChange={(e) => handleItemChange(index, 'quantity', parseFloat(e.target.value) || 0)}
-                                className="w-full px-2 py-1 bg-slate-50/50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 text-center focus:outline-none focus:ring-1 focus:ring-primary rounded-lg text-xs font-semibold text-slate-800 dark:text-slate-200"
+                                value={item.quantity !== undefined ? item.quantity : 1}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value) || 0;
+                                  handleItemChange(index, 'quantity', val);
+                                  handleItemChange(index, 'amount', val * (parseFloat(item.unitPrice) || 0));
+                                }}
+                                className="w-full px-2 py-1.5 bg-slate-50/50 dark:bg-slate-900/40 border border-slate-205 dark:border-slate-800 text-center focus:outline-none focus:border-indigo-500 rounded-xl font-bold text-slate-800 dark:text-slate-200"
                               />
                             </td>
-                            <td className="py-2.5 px-3">
+                            {isSubscription && (
+                              <td className="py-3 px-4 text-center text-[10px] font-bold uppercase text-slate-500">
+                                {billingUnitLabel(subscriptionLines[index]?.billingUnit)}
+                              </td>
+                            )}
+                            <td className="py-3 px-4">
                               <input
                                 type="number"
-                                value={item.unitPrice}
-                                onChange={(e) => handleItemChange(index, 'unitPrice', parseFloat(e.target.value) || 0)}
-                                className="w-full px-2 py-1 bg-slate-50/50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 text-right focus:outline-none focus:ring-1 focus:ring-primary rounded-lg text-xs font-semibold text-slate-800 dark:text-slate-200"
+                                value={item.unitPrice !== undefined ? item.unitPrice : 0}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value) || 0;
+                                  handleItemChange(index, 'unitPrice', val);
+                                  handleItemChange(index, 'amount', (parseFloat(item.quantity) || 1) * val);
+                                }}
+                                className="w-full px-2 py-1.5 bg-slate-50/50 dark:bg-slate-900/40 border border-slate-205 dark:border-slate-800 text-right focus:outline-none focus:border-indigo-500 rounded-xl font-bold text-slate-800 dark:text-slate-200"
                               />
                             </td>
-                            <td className="py-2.5 px-3 text-right font-extrabold text-xs text-slate-700 dark:text-slate-300">
-                              {(item.quantity * item.unitPrice).toFixed(2)}
+                            <td className="py-3 px-4 text-right font-bold text-slate-700 dark:text-slate-300">
+                              {((parseFloat(item.quantity) || 1) * (parseFloat(item.unitPrice) || 0)).toFixed(2)}
                             </td>
-                            <td className="py-2.5 px-3 text-center space-x-1.5">
+                            <td className="py-3 px-4 text-center space-x-1">
                               <button
                                 type="button"
                                 onClick={() => handleDuplicateItem(index)}
-                                className="p-1 text-slate-400 hover:text-primary rounded inline-flex"
+                                className="p-1.5 text-slate-450 hover:text-indigo-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg inline-flex"
                                 title="Duplicate Row"
                               >
                                 <Copy size={12} />
@@ -595,7 +642,7 @@ export const InvoiceDetail: React.FC = () => {
                               <button
                                 type="button"
                                 onClick={() => handleDeleteItem(index)}
-                                className="p-1 text-slate-400 hover:text-red-500 rounded inline-flex"
+                                className="p-1.5 text-slate-455 hover:text-rose-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg inline-flex"
                                 title="Delete Row"
                               >
                                 <Trash2 size={12} />
@@ -608,113 +655,118 @@ export const InvoiceDetail: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 4. Totals & Tax Calculation */}
-                <div className="border-t border-slate-100 dark:border-slate-800 pt-4 flex flex-col md:flex-row md:items-start justify-between gap-6">
-                  {/* Left Notes/Other Tax fields */}
-                  <div className="grid grid-cols-2 gap-4 flex-1 max-w-md">
-                    <div>
-                      <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                        GST / Tax Registration
-                      </label>
-                      <input
-                        type="text"
-                        value={formData.gstNumber}
-                        onChange={(e) => handleFieldChange('gstNumber', e.target.value)}
-                        placeholder="GSTIN"
-                        className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:ring-2 focus:outline-none transition-all ${getFieldHighlight(
-                          'gstNumber'
-                        )}`}
-                      />
+                {/* 4. Totals Grid and Tax registrations */}
+                <div className="border-t border-slate-200 dark:border-slate-800 pt-5 flex flex-col md:flex-row md:items-start justify-between gap-6">
+                  {/* Registrations & POs */}
+                  <div className="flex-1 max-w-md space-y-4 font-semibold">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <label className="block text-[10px] text-slate-450 dark:text-slate-500 uppercase tracking-wider">
+                          GST / Tax Registration
+                        </label>
+                        <input
+                          type="text"
+                          value={formData.gstNumber}
+                          onChange={(e) => handleFieldChange('gstNumber', e.target.value)}
+                          placeholder="GSTIN"
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-850 dark:text-slate-200 focus:ring-4 focus:outline-none transition-all ${getFieldHighlight(
+                            'gstNumber'
+                          )}`}
+                        />
+                      </div>
+                      <div className="space-y-1.5 pt-5">
+                        <label className="block text-[10px] text-slate-455 dark:text-slate-500 uppercase tracking-wider">
+                          VAT Number
+                        </label>
+                        <input
+                          type="text"
+                          value={formData.vatNumber}
+                          onChange={(e) => handleFieldChange('vatNumber', e.target.value)}
+                          placeholder="VAT ID"
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-850 dark:text-slate-200 focus:ring-4 focus:outline-none transition-all ${getFieldHighlight(
+                            'vatNumber'
+                          )}`}
+                        />
+                      </div>
                     </div>
-                    <div>
-                      <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                        VAT Number
-                      </label>
-                      <input
-                        type="text"
-                        value={formData.vatNumber}
-                        onChange={(e) => handleFieldChange('vatNumber', e.target.value)}
-                        placeholder="VAT ID"
-                        className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:ring-2 focus:outline-none transition-all ${getFieldHighlight(
-                          'vatNumber'
-                        )}`}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                        Purchase Order #
-                      </label>
-                      <input
-                        type="text"
-                        value={formData.purchaseOrder}
-                        onChange={(e) => handleFieldChange('purchaseOrder', e.target.value)}
-                        placeholder="PO Number"
-                        className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:ring-2 focus:outline-none transition-all ${getFieldHighlight(
-                          'purchaseOrder'
-                        )}`}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                        Currency Selector
-                      </label>
-                      <select
-                        value={formData.currency}
-                        onChange={(e) => handleFieldChange('currency', e.target.value)}
-                        className={`w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-slate-900 dark:text-slate-100 focus:ring-2 focus:outline-none transition-all ${getFieldHighlight(
-                          'currency'
-                        )}`}
-                      >
-                        <option value="INR">INR (₹)</option>
-                        <option value="USD">USD ($)</option>
-                        <option value="EUR">EUR (€)</option>
-                        <option value="GBP">GBP (£)</option>
-                      </select>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <label className="block text-[10px] text-slate-450 dark:text-slate-500 uppercase tracking-wider">
+                          Purchase Order #
+                        </label>
+                        <input
+                          type="text"
+                          value={formData.purchaseOrder}
+                          onChange={(e) => handleFieldChange('purchaseOrder', e.target.value)}
+                          placeholder="PO Number"
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-850 dark:text-slate-200 focus:ring-4 focus:outline-none transition-all ${getFieldHighlight(
+                            'purchaseOrder'
+                          )}`}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="block text-[10px] text-slate-450 dark:text-slate-500 uppercase tracking-wider">
+                          Currency
+                        </label>
+                        <select
+                          value={formData.currency}
+                          onChange={(e) => handleFieldChange('currency', e.target.value)}
+                          className={`w-full px-3.5 py-2.5 rounded-xl border bg-transparent text-slate-850 dark:text-slate-200 focus:ring-4 focus:outline-none transition-all cursor-pointer ${getFieldHighlight(
+                            'currency'
+                          )}`}
+                        >
+                          <option value="INR" className="dark:bg-slate-900">INR (₹)</option>
+                          <option value="USD" className="dark:bg-slate-900">USD ($)</option>
+                          <option value="EUR" className="dark:bg-slate-900">EUR (€)</option>
+                          <option value="GBP" className="dark:bg-slate-900">GBP (£)</option>
+                        </select>
+                      </div>
                     </div>
                   </div>
 
                   {/* Calculations Grid */}
-                  <div className="w-full md:w-80 space-y-3 text-sm border border-slate-200 dark:border-slate-800 p-4 rounded-xl bg-slate-50/10 dark:bg-slate-900/10 font-medium">
-                    <div className="flex justify-between items-center text-slate-500">
+                  <div className="w-full md:w-80 space-y-3 border border-slate-200 dark:border-slate-800 p-4.5 rounded-2xl bg-slate-50/5 dark:bg-slate-900/5 font-semibold text-xs">
+                    <div className="flex justify-between items-center text-slate-450 dark:text-slate-500">
                       <span>Subtotal</span>
-                      <span className="font-bold text-slate-800 dark:text-slate-200">{subtotal.toFixed(2)}</span>
+                      <span className="font-bold text-slate-800 dark:text-white">{subtotal.toFixed(2)}</span>
                     </div>
 
-                    <div className="flex justify-between items-center text-slate-500">
+                    <div className="flex justify-between items-center text-slate-450 dark:text-slate-550">
                       <span>Discount (-)</span>
                       <input
                         type="number"
                         value={formData.discount}
                         onChange={(e) => handleFieldChange('discount', parseFloat(e.target.value) || 0)}
-                        className="w-24 text-right bg-slate-100/50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 focus:outline-none focus:ring-1 focus:ring-primary rounded px-2.5 py-1 text-xs font-bold text-slate-800 dark:text-slate-200"
+                        className="w-24 text-right bg-slate-50 dark:bg-slate-850 border border-slate-205 dark:border-slate-800 focus:outline-none focus:border-indigo-500 rounded-xl px-2.5 py-1 font-bold text-slate-850 dark:text-white"
                       />
                     </div>
 
-                    <div className="flex justify-between items-center text-slate-500">
+                    <div className="flex justify-between items-center text-slate-450 dark:text-slate-550">
                       <span>Tax (+)</span>
                       <input
                         type="number"
                         value={formData.tax}
                         onChange={(e) => handleFieldChange('tax', parseFloat(e.target.value) || 0)}
-                        className="w-24 text-right bg-slate-100/50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 focus:outline-none focus:ring-1 focus:ring-primary rounded px-2.5 py-1 text-xs font-bold text-slate-800 dark:text-slate-200"
+                        className="w-24 text-right bg-slate-50 dark:bg-slate-850 border border-slate-205 dark:border-slate-800 focus:outline-none focus:border-indigo-500 rounded-xl px-2.5 py-1 font-bold text-slate-850 dark:text-white"
                       />
                     </div>
 
-                    <div className="flex justify-between items-center text-slate-500">
+                    <div className="flex justify-between items-center text-slate-455 dark:text-slate-550">
                       <span>Shipping (+)</span>
                       <input
                         type="number"
                         value={formData.shipping}
                         onChange={(e) => handleFieldChange('shipping', parseFloat(e.target.value) || 0)}
-                        className="w-24 text-right bg-slate-100/50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/60 focus:outline-none focus:ring-1 focus:ring-primary rounded px-2.5 py-1 text-xs font-bold text-slate-800 dark:text-slate-200"
+                        className="w-24 text-right bg-slate-50 dark:bg-slate-850 border border-slate-205 dark:border-slate-800 focus:outline-none focus:border-indigo-500 rounded-xl px-2.5 py-1 font-bold text-slate-855 dark:text-white"
                       />
                     </div>
 
-                    <hr className="border-slate-200 dark:border-slate-800 my-2" />
+                    <hr className="border-slate-200 dark:border-slate-800/80 my-2" />
 
-                    <div className="flex justify-between items-center text-base font-extrabold text-slate-800 dark:text-white">
+                    <div className="flex justify-between items-center text-sm font-extrabold text-slate-800 dark:text-white">
                       <span>Grand Total ({formData.currency})</span>
-                      <span className="text-primary">{grandTotal.toFixed(2)}</span>
+                      <span className="text-indigo-500 dark:text-indigo-400">{grandTotal.toFixed(2)}</span>
                     </div>
                   </div>
                 </div>

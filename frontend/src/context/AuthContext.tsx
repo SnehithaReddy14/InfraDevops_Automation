@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useState, useEffect } from 'react';
 import api from '../utils/api';
 
 interface User {
@@ -21,19 +21,14 @@ interface AuthContextType {
 export const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>({
-    id: 1,
-    email: 'admin@company.com',
-    name: 'Sarah Connor',
-    role: 'ADMIN',
-  });
+  const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    // Auto-login with test credentials in dev mode
-    const initializeTestUser = async () => {
+    const initializeUser = async () => {
       const token = localStorage.getItem('token');
-      if (!token) {
+      
+      const performAutoLogin = async () => {
         try {
           const response = await fetch('http://localhost:5000/api/auth/login', {
             method: 'POST',
@@ -53,11 +48,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } catch (err) {
           console.error('[AuthContext] Failed to auto-login', err);
         }
+      };
+
+      if (token) {
+        try {
+          const response = await fetch('http://localhost:5000/api/auth/me', {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (response.ok) {
+            const data = await response.json();
+            setUser(data.user);
+          } else {
+            await performAutoLogin();
+          }
+        } catch (err) {
+          console.error('[AuthContext] Failed to load profile', err);
+          await performAutoLogin();
+        }
+      } else {
+        await performAutoLogin();
       }
       setLoading(false);
     };
 
-    initializeTestUser();
+    initializeUser();
   }, []);
 
   const login = async (email: string, password: string) => {
@@ -93,12 +108,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('refreshToken');
-    setUser({
-      id: 1,
-      email: 'admin@company.com',
-      name: 'Sarah Connor',
-      role: 'ADMIN',
-    });
+    setUser(null);
   };
 
   return (

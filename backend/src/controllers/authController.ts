@@ -7,65 +7,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_enterprise_jwt_key_pl
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'super_secret_enterprise_refresh_jwt_key_please_change';
 
 export const register = async (req: Request, res: Response): Promise<any> => {
-  const { email, password, name, role } = req.body;
-
-  if (!email || !password || !name) {
-    return res.status(400).json({ error: 'Email, password, and name are required' });
-  }
-
-  try {
-    const existingUser = await prisma.user.findUnique({ where: { email } });
-    if (existingUser) {
-      return res.status(400).json({ error: 'User with this email already exists' });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-    const validRoles = ['ADMIN', 'FINANCE_MANAGER', 'EMPLOYEE', 'AUDITOR'];
-    const userRole = validRoles.includes(role) ? role : 'EMPLOYEE';
-
-    const user = await prisma.user.create({
-      data: {
-        email,
-        passwordHash,
-        name,
-        role: userRole as any,
-      },
-    });
-
-    // Create a registration audit log
-    await prisma.auditLog.create({
-      data: {
-        userId: user.id,
-        action: 'REGISTER',
-        ipAddress: req.ip || req.socket.remoteAddress,
-      },
-    });
-
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role, name: user.name },
-      JWT_SECRET,
-      { expiresIn: '1d' }
-    );
-    const refreshToken = jwt.sign(
-      { id: user.id, email: user.email, role: user.role, name: user.name },
-      JWT_REFRESH_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    return res.status(201).json({
-      token,
-      refreshToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-      },
-    });
-  } catch (error: any) {
-    console.error('Registration error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
+  return res.status(403).json({
+    error: 'Registration is disabled. Only one administrator user is allowed.',
+  });
 };
 
 export const login = async (req: Request, res: Response): Promise<any> => {
@@ -86,14 +30,7 @@ export const login = async (req: Request, res: Response): Promise<any> => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    // Create a login audit log
-    await prisma.auditLog.create({
-      data: {
-        userId: user.id,
-        action: 'LOGIN',
-        ipAddress: req.ip || req.socket.remoteAddress,
-      },
-    });
+
 
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role, name: user.name },
@@ -178,5 +115,49 @@ export const me = async (req: any, res: Response): Promise<any> => {
     return res.status(200).json({ user });
   } catch (error) {
     return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const updateProfile = async (req: any, res: Response): Promise<any> => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const userId = req.user.id;
+  const { name, email } = req.body;
+
+  if (!name || !email) {
+    return res.status(400).json({ error: 'Name and email are required.' });
+  }
+
+  try {
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        email,
+        id: { not: userId }
+      }
+    });
+
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email is already taken by another user.' });
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: { name, email },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+      }
+    });
+
+    return res.status(200).json({
+      message: 'Profile updated successfully',
+      user: updatedUser
+    });
+  } catch (error) {
+    console.error('Update profile error:', error);
+    return res.status(500).json({ error: 'Internal server error while updating profile.' });
   }
 };

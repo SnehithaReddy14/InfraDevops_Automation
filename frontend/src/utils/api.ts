@@ -1,5 +1,16 @@
 const BASE_URL = 'http://localhost:5000/api';
 
+/** Server origin for static files (uploads), without /api suffix. */
+export function getServerBaseUrl(): string {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return String(import.meta.env.VITE_API_BASE_URL).replace(/\/api\/?$/, '');
+  }
+  if (window.location.hostname === 'localhost') {
+    return 'http://localhost:5000';
+  }
+  return 'https://backend-inky-rho-52.vercel.app';
+}
+
 class ApiClient {
   private async request(endpoint: string, options: RequestInit = {}): Promise<any> {
     const url = `${BASE_URL}${endpoint}`;

@@ -9,52 +9,54 @@ export default {
     extend: {
       colors: {
         primary: {
-          DEFAULT: '#2563EB',
-          hover: '#1D4ED8',
-          light: '#DBEAFE',
+          DEFAULT: '#066AAB',
+          hover: '#055990',
+          light: '#E6F4FC',
         },
         secondary: {
-          DEFAULT: '#3B82F6',
-          hover: '#2563EB',
+          DEFAULT: '#7A2CFF',
+          hover: '#6320D6',
+          magenta: '#BB4CF0',
+          dark: '#0B1220',
         },
         success: {
           DEFAULT: '#22C55E',
-          light: '#DCFCE7',
-          dark: '#166534',
+          light: '#F0FDF4',
+          dark: '#15803D',
         },
         warning: {
           DEFAULT: '#F59E0B',
           light: '#FEF3C7',
-          dark: '#92400E',
+          dark: '#B45309',
         },
         danger: {
           DEFAULT: '#EF4444',
-          light: '#FEE2E2',
-          dark: '#991B1B',
+          light: '#FEF2F2',
+          dark: '#B91C1C',
         },
         background: {
-          light: '#F8FAFC',
-          dark: '#0F172A',
+          light: '#FFFFFF',
+          dark: '#0B1220',
         },
         card: {
           light: '#FFFFFF',
-          dark: '#1E293B',
+          dark: '#0F172A',
         },
         border: {
-          light: '#E2E8F0',
-          dark: '#334155',
+          light: '#E5E7EB',
+          dark: '#1E293B',
         }
       },
       fontFamily: {
-        sans: ['Inter', 'Geist', 'SF Pro Display', 'sans-serif'],
+        sans: ['Geist', 'Inter', 'SF Pro Display', 'sans-serif'],
       },
       borderRadius: {
         'lg': '16px',
-        'xl': '24px',
+        'xl': '20px',
       },
       boxShadow: {
-        'glass': '0 8px 32px 0 rgba(31, 38, 135, 0.07)',
-        'premium': '0 10px 30px -10px rgba(0, 0, 0, 0.04), 0 1px 1px 0 rgba(0, 0, 0, 0.02)',
+        'glass': '0 8px 32px 0 rgba(0, 0, 0, 0.02)',
+        'premium': '0 10px 30px -10px rgba(0, 0, 0, 0.03), 0 1px 1px 0 rgba(0, 0, 0, 0.01)',
       }
     },
   },

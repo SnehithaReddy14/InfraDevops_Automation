@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 560" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F8FAFC" />
+      <stop offset="100%" stop-color="#EFF6FF" />
+    </linearGradient>
+    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6" />
+      <stop offset="100%" stop-color="#1D4ED8" />
+    </linearGradient>
+    <linearGradient id="indigoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#4338CA" />
+    </linearGradient>
+    <linearGradient id="tealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0D9488" />
+      <stop offset="100%" stop-color="#0F766E" />
+    </linearGradient>
+    <linearGradient id="purpleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8B5CF6" />
+      <stop offset="100%" stop-color="#6D28D9" />
+    </linearGradient>
+    <linearGradient id="emeraldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10B981" />
+      <stop offset="100%" stop-color="#047857" />
+    </linearGradient>
+    <linearGradient id="amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F59E0B" />
+      <stop offset="100%" stop-color="#D97706" />
+    </linearGradient>
+    <linearGradient id="roseGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F43F5E" />
+      <stop offset="100%" stop-color="#BE123C" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="125%" height="125%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0F172A" flood-opacity="0.08" />
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#64748B" />
+    </marker>
+    <marker id="arrowIndigo" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#6366F1" />
+    </marker>
+  </defs>
+
+  <rect width="920" height="560" rx="16" fill="url(#bgGrad)" />
+  <rect width="920" height="560" rx="16" fill="none" stroke="#E2E8F0" stroke-width="2" />
+
+  <text x="460" y="38" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="800" fill="#0F172A" text-anchor="middle">AWS BILLING AUTOMATION</text>
+  <text x="460" y="58" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="500" fill="#64748B" text-anchor="middle">Invoice ingestion · Project workspaces · Dynamic billing · PostgreSQL</text>
+
+  <!-- Row label: Invoice pipeline -->
+  <text x="36" y="98" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#94A3B8" letter-spacing="1">INVOICE PIPELINE</text>
+
+  <!-- 1 Upload -->
+  <g transform="translate(36, 110)" filter="url(#shadow)">
+    <rect width="120" height="108" rx="12" fill="url(#blueGrad)" />
+    <path d="M42,32 H78 L86,40 V78 H42 Z" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linejoin="round" />
+    <path d="M56,72 V54 M48,62 L56,54 L64,62" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="60" y="92" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF" text-anchor="middle">UPLOAD</text>
+    <text x="60" y="104" font-family="system-ui, sans-serif" font-size="8" fill="#93C5FD" text-anchor="middle">Project-scoped PDF</text>
+  </g>
+
+  <!-- 2 Parser -->
+  <g transform="translate(186, 110)" filter="url(#shadow)">
+    <rect width="120" height="108" rx="12" fill="url(#indigoGrad)" />
+    <rect x="48" y="34" width="24" height="24" rx="5" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    <circle cx="60" cy="46" r="4" fill="#FFFFFF" />
+    <text x="60" y="88" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF" text-anchor="middle">PARSER / OCR</text>
+    <text x="60" y="100" font-family="system-ui, sans-serif" font-size="7.5" fill="#C7D2FE" text-anchor="middle">Gemini · E2E · Jira</text>
+    <text x="60" y="109" font-family="system-ui, sans-serif" font-size="7.5" fill="#C7D2FE" text-anchor="middle">subscriptionLines</text>
+  </g>
+
+  <!-- 3 Verify -->
+  <g transform="translate(336, 110)" filter="url(#shadow)">
+    <rect width="120" height="108" rx="12" fill="url(#tealGrad)" />
+    <path d="M42,38 L54,50 L78,28" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+    <rect x="38" y="58" width="44" height="4" rx="2" fill="#FFFFFF" opacity="0.85"/>
+    <rect x="38" y="66" width="32" height="4" rx="2" fill="#FFFFFF" opacity="0.85"/>
+    <text x="60" y="88" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF" text-anchor="middle">VERIFY</text>
+    <text x="60" y="100" font-family="system-ui, sans-serif" font-size="8" fill="#99F6E4" text-anchor="middle">InvoiceDetail</text>
+    <text x="60" y="109" font-family="system-ui, sans-serif" font-size="8" fill="#99F6E4" text-anchor="middle">Seats &amp; line items</text>
+  </g>
+
+  <!-- 4 PostgreSQL -->
+  <g transform="translate(486, 110)" filter="url(#shadow)">
+    <rect width="120" height="108" rx="12" fill="url(#purpleGrad)" />
+    <path d="M42,36 C42,31 78,31 78,36 C78,41 42,41 42,36 Z" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    <path d="M42,36 V50 C42,55 78,55 78,50 V36" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    <path d="M42,50 V64 C42,69 78,69 78,64 V50" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    <text x="60" y="84" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF" text-anchor="middle">POSTGRESQL</text>
+    <text x="60" y="96" font-family="system-ui, sans-serif" font-size="8" fill="#E9D5FF" text-anchor="middle">Prisma · 6 tables</text>
+    <text x="60" y="106" font-family="system-ui, sans-serif" font-size="8" fill="#E9D5FF" text-anchor="middle">Invoice · Project</text>
+  </g>
+
+  <!-- 5 Analytics -->
+  <g transform="translate(636, 110)" filter="url(#shadow)">
+    <rect width="120" height="108" rx="12" fill="url(#emeraldGrad)" />
+    <path d="M42,72 V48 H52 V72 Z M56,72 V38 H68 V72 Z M72,72 V58 H82 V72 Z" fill="#FFFFFF" opacity="0.9"/>
+    <text x="60" y="88" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF" text-anchor="middle">ANALYTICS</text>
+    <text x="60" y="100" font-family="system-ui, sans-serif" font-size="8" fill="#A7F3D0" text-anchor="middle">Dashboard matrix</text>
+    <text x="60" y="109" font-family="system-ui, sans-serif" font-size="8" fill="#A7F3D0" text-anchor="middle">Billing ledger</text>
+  </g>
+
+  <!-- Pipeline arrows -->
+  <path d="M156,164 H182" fill="none" stroke="#64748B" stroke-width="2" marker-end="url(#arrow)" />
+  <path d="M306,164 H332" fill="none" stroke="#64748B" stroke-width="2" marker-end="url(#arrow)" />
+  <path d="M456,164 H482" fill="none" stroke="#64748B" stroke-width="2" marker-end="url(#arrow)" />
+  <path d="M606,164 H632" fill="none" stroke="#64748B" stroke-width="2" marker-end="url(#arrow)" />
+
+  <!-- Row label: Project workspace -->
+  <text x="36" y="268" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#94A3B8" letter-spacing="1">PROJECT WORKSPACE</text>
+
+  <!-- 6 Projects UI -->
+  <g transform="translate(96, 280)" filter="url(#shadow)">
+    <rect width="130" height="108" rx="12" fill="url(#blueGrad)" />
+    <rect x="44" y="36" width="42" height="32" rx="4" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    <path d="M52,48 H78 M52,56 H72" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+    <text x="65" y="88" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF" text-anchor="middle">PROJECTS</text>
+    <text x="65" y="100" font-family="system-ui, sans-serif" font-size="8" fill="#93C5FD" text-anchor="middle">Infra · Invoices</text>
+    <text x="65" y="109" font-family="system-ui, sans-serif" font-size="8" fill="#93C5FD" text-anchor="middle">Billing tab</text>
+  </g>
+
+  <!-- 7 CloudResource -->
+  <g transform="translate(276, 280)" filter="url(#shadow)">
+    <rect width="130" height="108" rx="12" fill="url(#amberGrad)" />
+    <circle cx="50" cy="48" r="8" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    <circle cx="80" cy="48" r="8" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    <path d="M58,48 H72" stroke="#FFFFFF" stroke-width="2"/>
+    <text x="65" y="78" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF" text-anchor="middle">INFRA / SaaS</text>
+    <text x="65" y="90" font-family="system-ui, sans-serif" font-size="8" fill="#FDE68A" text-anchor="middle">CloudResource</text>
+    <text x="65" y="100" font-family="system-ui, sans-serif" font-size="8" fill="#FDE68A" text-anchor="middle">seats · specs</text>
+    <text x="65" y="109" font-family="system-ui, sans-serif" font-size="8" fill="#FDE68A" text-anchor="middle">dynamic forms</text>
+  </g>
+
+  <!-- 8 Billing view -->
+  <g transform="translate(456, 280)" filter="url(#shadow)">
+    <rect width="130" height="108" rx="12" fill="url(#indigoGrad)" />
+    <rect x="40" y="38" width="50" height="8" rx="2" fill="#FFFFFF" opacity="0.9"/>
+    <rect x="40" y="50" width="50" height="8" rx="2" fill="#FFFFFF" opacity="0.6"/>
+    <rect x="40" y="62" width="50" height="8" rx="2" fill="#FFFFFF" opacity="0.6"/>
+    <text x="65" y="84" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF" text-anchor="middle">BILLING VIEW</text>
+    <text x="65" y="96" font-family="system-ui, sans-serif" font-size="8" fill="#C7D2FE" text-anchor="middle">Dynamic columns</text>
+    <text x="65" y="106" font-family="system-ui, sans-serif" font-size="8" fill="#C7D2FE" text-anchor="middle">Month + costs</text>
+  </g>
+
+  <!-- 9 Discrepancy -->
+  <g transform="translate(636, 280)" filter="url(#shadow)">
+    <rect width="130" height="108" rx="12" fill="url(#roseGrad)" />
+    <path d="M48,58 L58,68 L82,44" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M48,58 L58,48" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+    <text x="65" y="84" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF" text-anchor="middle">SCOPE CHECK</text>
+    <text x="65" y="96" font-family="system-ui, sans-serif" font-size="8" fill="#FECDD3" text-anchor="middle">Invoice vs infra</text>
+    <text x="65" y="106" font-family="system-ui, sans-serif" font-size="8" fill="#FECDD3" text-anchor="middle">discrepancies</text>
+  </g>
+
+  <!-- Workspace arrows -->
+  <path d="M226,334 H272" fill="none" stroke="#6366F1" stroke-width="2" marker-end="url(#arrowIndigo)" />
+  <path d="M406,334 H452" fill="none" stroke="#6366F1" stroke-width="2" marker-end="url(#arrowIndigo)" />
+  <path d="M586,334 H632" fill="none" stroke="#6366F1" stroke-width="2" marker-end="url(#arrowIndigo)" />
+
+  <!-- DB connections (dashed) -->
+  <path d="M546,218 V250 H161 V280" fill="none" stroke="#8B5CF6" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrow)" />
+  <path d="M546,218 V250 H341 V280" fill="none" stroke="#8B5CF6" stroke-width="1.5" stroke-dasharray="5 4" />
+  <path d="M546,218 V250 H521 V280" fill="none" stroke="#8B5CF6" stroke-width="1.5" stroke-dasharray="5 4" />
+  <text x="400" y="242" font-family="system-ui, sans-serif" font-size="9" font-weight="600" fill="#7C3AED" text-anchor="middle">read / write via Prisma</text>
+
+  <!-- Navigation note -->
+  <rect x="36" y="430" width="848" height="100" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="56" y="458" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="#0F172A">Active UI navigation</text>
+  <text x="56" y="478" font-family="system-ui, sans-serif" font-size="10" fill="#475569">Dashboard · Projects · Invoice ledger</text>
+  <text x="56" y="498" font-family="system-ui, sans-serif" font-size="10" fill="#475569">Billing grids exclude FX metadata (fxInrPerUsd) · Optional env filter when 2+ invoice environments</text>
+  <text x="56" y="516" font-family="system-ui, sans-serif" font-size="10" fill="#475569">Docs: docs/DATABASE.md · docs/FEATURES.md · docs/ARCHITECTURE.md</text>
+</svg>

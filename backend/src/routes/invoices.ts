@@ -6,16 +6,14 @@ import {
   getInvoices,
   getInvoiceById,
   updateInvoice,
-  approveInvoice,
-  rejectInvoice,
   deleteInvoice,
   handleBulkAction,
   getDashboardStats,
   queryAssistant,
   exportInvoices,
-  getAuditLogs
+  extractInvoiceOnly
 } from '../controllers/invoiceController';
-import { authenticateToken, requireRole } from '../middleware/auth';
+import { authenticateToken } from '../middleware/auth';
 
 const router = Router();
 
@@ -50,17 +48,15 @@ const upload = multer({
 router.use(authenticateToken);
 
 router.post('/upload', upload.single('invoice'), uploadInvoice);
+router.post('/extract', upload.single('invoice'), extractInvoiceOnly);
 router.get('/', getInvoices);
 router.get('/dashboard-stats', getDashboardStats);
-router.get('/audit-logs', getAuditLogs);
 router.post('/assistant-query', queryAssistant);
 router.get('/export', exportInvoices);
 router.post('/bulk', handleBulkAction);
 
 router.get('/:id', getInvoiceById);
 router.put('/:id', updateInvoice);
-router.post('/:id/approve', requireRole(['ADMIN', 'FINANCE_MANAGER']), approveInvoice);
-router.post('/:id/reject', requireRole(['ADMIN', 'FINANCE_MANAGER']), rejectInvoice);
-router.delete('/:id', requireRole(['ADMIN', 'FINANCE_MANAGER']), deleteInvoice);
+router.delete('/:id', deleteInvoice);
 
 export default router;
